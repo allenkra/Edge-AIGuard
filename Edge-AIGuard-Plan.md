@@ -988,7 +988,323 @@ watch -n 1 'echo "TEMP:"; vcgencmd measure_temp; echo "THROTTLE:"; vcgencmd get_
 
 ---
 
+## Day 1.5: pipecat 全双工流式架构演进
+
+> **完成日期**: 2026-04-29
+> **commit**: `f2de110 feat(day1.5): pipecat full-duplex pipeline + KV-cache & streaming validation`
+> **主代码**: `pipeline_pipecat.py` (取代 `pipeline.py`; 后者保留作 smoke test)
+> **配套**: `bench_pipecat.py`, `bench_sherpa.py`, `test_kv_cache.py`
+
+### 为什么演进
+
+Day 1 baseline TTFT 7-8s 远超 plan 目标 sub-3s. 瓶颈是 "录完整段 → 整段 ASR → 等 LLM 全文 → TTS 播放" 的串行结构. 解法是流式化每一段:
+
+| 模块 | Day 1 | Day 1.5 |
+|------|-------|---------|
+| ASR | faster-whisper base.en (整段) | **sherpa-onnx Zipformer** (流式 int8 + endpoint detection) |
+| 编排 | requests + manual loop | **pipecat** (Pipeline / FrameProcessor / PipelineRunner) |
+| LLM | 直接 HTTP `/api/generate` | pipecat `OLLamaLLMService` (LLMContext, KV-cache 友好) |
+| TTS | subprocess piper + aplay | pipecat `PiperTTSService` |
+| VAD | (无) | **Silero VAD** (支持 barge-in) |
+| audio I/O | sounddevice / aplay | **`LocalAudioTransport`** (Pi 本地 ALSA) |
+| radar 注入 | 每轮重新拼整段 prompt | `RadarSystemPromptUpdater` 原地改 `_messages[0]` 保 KV-cache |
+
+### 关键约束 (影响后续 Day 2 设计)
+
+1. **音频 I/O 抽象在 transport 层**: 要把 mic/speaker 从 Pi 本地换到 Core2, 必须替换 `LocalAudioTransport`, **不是简单加 HTTP 端点**
+2. **流式特性是核心价值**: VAD + endpoint-driven STT 是 TTFA 优化的来源; push-to-talk 会废掉这部分收益
+3. **system prompt 前缀稳定**: `prompts.py` 固定前缀 + 数字尾巴的设计是为 Ollama KV-cache 命中, 任何修改都要保持这个性质
+
+### 新增依赖
+
+- `pipecat-ai`, `sherpa-onnx`, `silero-vad`
+- ASR 模型 `models/streaming-zipformer-en/` (~150MB, gitignored, 由 setup 脚本拉)
+
+---
+
+## Day 2 (修订): Core2 集成到 pipecat 架构
+
+> **状态**: 当前执行计划. 原 Day 2 (基于 `pipeline.py`) 已被本节 supersede.
+> **核心目标**: 把 Core2 接入 `pipeline_pipecat.py`, 替代 `LocalAudioTransport` 做远端 mic/speaker, **不丢失** Day 1.5 流式优化.
+
+### 路径选择
+
+| | Path A: Push-to-Talk MVP | Path B: 流式 voice_assistant |
+|--|---------------------------|------------------------------|
+| Core2 yaml | button → `microphone.capture(5s)` → `http_request.post` | `voice_assistant` 组件 (UDP 流) |
+| Pi 实现 | Flask `/audio` POST + 走 `wav_smoke_test` 路径 | 自定义 `Core2Transport(BaseTransport)` |
+| 流式 / barge-in | ❌ 全废 | ✅ 保留 |
+| TTFA | 退化到 ~8s 水平 | 保住 Day 1.5 |
+| 工作量 | ~1 天 | ~2-3 天 |
+| 默认推荐 | demo 时间紧迫的 fallback | ✅ **首选** |
+
+Phase 1 不区分 A/B (共用), 跑通后视实际进度决定 Phase 2 走哪条.
+
+### Phase 1: Core2 基础固件 (~45 min, A/B 共用前提)
+
+不涉及音频 I/O. 只验证烧录链路 + 显示 + 按键 + Pi 状态推送. 烧完后进入 OTA 模式, 后续不再插 USB.
+
+**1.1 装 ESPHome (Pi 上, 新 venv 隔离)**
+```bash
+python3 -m venv ~/esphome-env
+source ~/esphome-env/bin/activate
+pip install esphome
+# 若 Python 3.13 不兼容: sudo apt install python3.11 python3.11-venv
+# 然后 python3.11 -m venv ~/esphome-env
+```
+
+**1.2 写 `esphome/core2.yaml` v1**: WiFi + ILI9342C 显示 + GPIO39 button A + ESPHome service `update_status(status, hr, br)`. 模板基于原 Day 2.2.3, **删除 microphone/i2s_audio 部分** (Phase 2 再加).
+
+**1.3 secrets**: `esphome/secrets.yaml` (gitignored), WiFi pass + 32-byte api_password (base64) + ota_password. 用户**直接在 Pi 上 nano** 写, 不发对话.
+
+**1.4 物理连接 + 首次烧录**
+- Core2 USB-C → Pi USB-A
+- 验设备: `ls /dev/ttyUSB* /dev/ttyACM*`
+- 验权限: `groups | grep dialout || sudo usermod -aG dialout $USER` (要重登)
+- `esphome run esphome/core2.yaml` (首次编译 5-10 min, OTA 后续秒级)
+
+**1.5 Pi 端 `esp_client.py` + 集成 `pipeline_pipecat.py`**
+- 用 aioesphomeapi 调 Core2 `update_status` service
+- 加一个 `FrameProcessor` 监听 `TranscriptionFrame` / `LLMFullResponseStartFrame` / `TTSStoppedFrame`, push 状态到 Core2 显示
+- radar 状态每秒同步 (复用 `RadarSystemPromptUpdater` 已经持有的 `radar.get_state`)
+
+### Phase 2 (默认 Path B): 流式 voice_assistant Transport (~2-3 天)
+
+**2.1 yaml 加音频组件**
+```yaml
+i2s_audio:
+  - id: i2s_input
+    i2s_lrclk_pin: GPIO0
+
+microphone:
+  - platform: i2s_audio
+    id: m5_mic
+    i2s_din_pin: GPIO34
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+
+speaker:
+  - platform: i2s_audio
+    id: m5_speaker
+    i2s_dout_pin: GPIO2   # NS4168 amp on Core2
+
+voice_assistant:
+  microphone: m5_mic
+  speaker: m5_speaker
+  noise_suppression_level: 2
+  use_wake_word: false   # Phase 3 再开
+  on_listening: [...]    # 推 status_text="Listening..."
+  on_tts_start: [...]    # status_text="Speaking..."
+  on_end: [...]          # status_text="Ready"
+```
+
+**2.2 Pi 端 `core2_transport.py`**: 实现 `Core2Transport(BaseTransport)`
+- `input()`: 监听 aioesphomeapi `subscribe_voice_assistant`, UDP 收 16kHz/int16/10ms chunks → 包装 `AudioRawFrame` 推下游 STT
+- `output()`: 收 `TTSAudioRawFrame` → UDP 回推 Core2 喇叭
+- 参考: aioesphomeapi `voice_assistant.py` 源码, ESPHome `voice_assistant` component 文档
+
+**2.3 `pipeline_pipecat.py` 加 `--core2` mode**
+- `build_pipeline` 里根据 `args.core2` 选 `Core2Transport(host=...)` 替换 `LocalAudioTransport`
+- 其余 (STT / radar updater / LLM / TTS) 不动
+
+**2.4 端到端测试**: `python pipeline_pipecat.py --core2`, 按 Core2 按键 → 说话 → Core2 喇叭出回应
+
+### Phase 3 (Stretch): 唤醒词 (~30 min)
+
+yaml 加 `micro_wake_word` (`hey_jarvis` 预训), `voice_assistant.use_wake_word: true`. 唤醒后 voice_assistant 自动 listening, 按键变成 fallback.
+
+### Phase 进度跟踪
+
+**Phase 1 (基础固件)**
+- [ ] 1.1 ESPHome 装好
+- [ ] 1.2 `core2.yaml` v1 写好
+- [ ] 1.3 secrets 写好
+- [ ] 1.4 首次 USB 烧录通过, 屏幕显示 Ready
+- [ ] 1.5 `esp_client.py` 状态推送到 Core2 工作
+
+**Phase 2 (Path B 默认; 时间紧降级 Path A)**
+- [ ] 2.1 yaml 加 voice_assistant 通过 OTA
+- [ ] 2.2 `Core2Transport` 实现
+- [ ] 2.3 `--core2` 集成进 `pipeline_pipecat.py`
+- [ ] 2.4 端到端语音 demo
+
+**Phase 3 (可选)**
+- [ ] 3.1 micro_wake_word 接入
+
+---
+
+## Day 1.5: pipecat 全双工流式架构演进
+
+> **完成日期**: 2026-04-29
+> **commit**: `f2de110 feat(day1.5): pipecat full-duplex pipeline + KV-cache & streaming validation`
+> **主代码**: `pipeline_pipecat.py` (取代 `pipeline.py`; 后者保留作 smoke test)
+> **配套**: `bench_pipecat.py`, `bench_sherpa.py`, `test_kv_cache.py`
+
+### 为什么演进
+
+Day 1 baseline TTFT 7-8s 远超 plan 目标 sub-3s. 瓶颈是 "录完整段 → 整段 ASR → 等 LLM 全文 → TTS 播放" 的串行结构. 解法是流式化每一段:
+
+| 模块 | Day 1 | Day 1.5 |
+|------|-------|---------|
+| ASR | faster-whisper base.en (整段) | **sherpa-onnx Zipformer** (流式 int8 + endpoint detection) |
+| 编排 | requests + manual loop | **pipecat** (Pipeline / FrameProcessor / PipelineRunner) |
+| LLM | 直接 HTTP `/api/generate` | pipecat `OLLamaLLMService` (LLMContext, KV-cache 友好) |
+| TTS | subprocess piper + aplay | pipecat `PiperTTSService` |
+| VAD | (无) | **Silero VAD** (支持 barge-in) |
+| audio I/O | sounddevice / aplay | **`LocalAudioTransport`** (Pi 本地 ALSA) |
+| radar 注入 | 每轮重新拼整段 prompt | `RadarSystemPromptUpdater` 原地改 `_messages[0]` 保 KV-cache |
+
+### 关键约束 (影响 Day 2 设计)
+
+1. **音频 I/O 抽象在 transport 层**: 要把 mic/speaker 从 Pi 本地换到 Core2, 必须替换 `LocalAudioTransport`, **不是简单加 HTTP 端点**
+2. **流式特性是核心价值**: VAD + endpoint-driven STT 是 TTFA 优化的来源; push-to-talk 模式会废掉这部分收益
+3. **system prompt 前缀稳定**: `prompts.py` 固定前缀 + 数字尾巴的设计是为 Ollama KV-cache 命中, 任何修改要保持
+
+### 新增依赖
+
+- `pipecat-ai`, `sherpa-onnx`, `silero-vad`
+- ASR 模型 `models/streaming-zipformer-en/` (~150MB, gitignored, 由 setup 脚本拉)
+
+---
+
+## Day 2 (修订): Core2 集成到 pipecat 架构
+
+> **状态**: 当前执行计划. 原 Day 2 (基于 `pipeline.py`) 已 supersede.
+> **核心目标**: 把 Core2 接入 `pipeline_pipecat.py` 替代 `LocalAudioTransport`, 远端 mic/speaker, **保留** Day 1.5 的流式 + barge-in 优化.
+> **触发方式**: 触摸按键启动会话模式 (Core2 屏幕底部 A/B/C 三个电容触摸键). 唤醒词作 Future Work, 不在本期范围.
+
+### 路径选择
+
+| | Path A: Push-to-Talk MVP | Path B: 流式 voice_assistant (tap-to-talk) |
+|--|---------------------------|------------------------------|
+| Core2 yaml | button → `microphone.capture(5s)` → `http_request.post` | `voice_assistant` 组件 (UDP 流), 按键 tap 触发会话 |
+| 触发模式 | 按住录音 / 按下录 5s | **轻按一下**, voice_assistant 开始 listening, 检测到结束 (silence/endpoint) 自动结束 |
+| Pi 实现 | Flask `/audio` POST + 走 `wav_smoke_test` | 自定义 `Core2Transport(BaseTransport)` |
+| 流式 / barge-in | ❌ 全废 | ✅ 保留 |
+| TTFA | 退化到 ~8s 水平 | 保住 Day 1.5 |
+| 工作量 | ~1 天 | ~2-3 天 |
+| 默认推荐 | demo 时间紧迫的 fallback | ✅ **首选** |
+
+Phase 1 不区分 A/B (共用基础固件), 跑通后看进度决定 Phase 2 走哪条.
+
+### Phase 1: Core2 基础固件 (~45 min, A/B 共用前提)
+
+不涉及音频. 验证烧录链路 + 显示 + 触摸按键事件 + Pi 状态推送. 烧完进入 OTA, 后续不再插 USB.
+
+**1.1 装 ESPHome (Pi 上, 新 venv 隔离)**
+```bash
+python3 -m venv ~/esphome-env
+source ~/esphome-env/bin/activate
+pip install esphome
+# 若 Python 3.13 不兼容: sudo apt install python3.11 python3.11-venv
+# 然后 python3.11 -m venv ~/esphome-env
+```
+
+**1.2 写 `esphome/core2.yaml` v1**: WiFi + ILI9342C 显示 (HR/BR/status) + 触摸按键 A 事件 + ESPHome service `update_status(status, hr, br)`. 模板参考原 Day 2.2.3, **删除 microphone/i2s_audio/speaker** (Phase 2 加).
+
+按键 binary_sensor 用 GPIO39 (Core2 原生 button A, 触摸感应已映射到 GPIO). 触摸 B/C 后续可加.
+
+**1.3 secrets**: `esphome/secrets.yaml` (gitignored), WiFi pass + 32-byte api_password (base64) + ota_password. 用户**直接在 Pi 上 `nano esphome/secrets.yaml`** 写, 不发对话.
+
+**1.4 物理连接 + 首次烧录**
+- Core2 USB-C → Pi USB-A
+- 验设备: `ls /dev/ttyUSB* /dev/ttyACM*`
+- 验权限: `groups | grep dialout || sudo usermod -aG dialout $USER` (要重新登录 shell)
+- `esphome run esphome/core2.yaml` (首次编译 5-10 min, OTA 之后秒级)
+
+**1.5 Pi 端 `esp_client.py` + 集成 `pipeline_pipecat.py`**
+- 用 aioesphomeapi 调 Core2 `update_status` service
+- 加一个 `FrameProcessor` 监听 `TranscriptionFrame` / `LLMFullResponseStartFrame` / `TTSStoppedFrame`, push 状态切换到 Core2
+- radar 状态每秒同步 (复用 `RadarSystemPromptUpdater` 已经持有的 `radar.get_state`)
+
+### Phase 2 (默认 Path B): 流式 voice_assistant Transport (~2-3 天)
+
+**2.1 yaml 加音频组件 + tap-to-talk**
+```yaml
+i2s_audio:
+  - id: i2s_input
+    i2s_lrclk_pin: GPIO0
+
+microphone:
+  - platform: i2s_audio
+    id: m5_mic
+    i2s_din_pin: GPIO34
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+
+speaker:
+  - platform: i2s_audio
+    id: m5_speaker
+    i2s_dout_pin: GPIO2   # NS4168 amp on Core2
+
+voice_assistant:
+  microphone: m5_mic
+  speaker: m5_speaker
+  noise_suppression_level: 2
+  use_wake_word: false   # Phase 3 (Future Work) 再开
+  on_listening:
+    - lambda: |- 
+        id(status_text) = "Listening...";
+  on_tts_start:
+    - lambda: |-
+        id(status_text) = "Speaking...";
+  on_end:
+    - lambda: |-
+        id(status_text) = "Ready";
+
+# 触摸按键 A: tap 一下启动会话, voice_assistant 自己用 endpoint 判断结束
+binary_sensor:
+  - platform: gpio
+    pin: { number: GPIO39, inverted: true }
+    name: "Button A"
+    on_press:
+      then:
+        - voice_assistant.start
+```
+
+**2.2 Pi 端 `core2_transport.py`**: 实现 `Core2Transport(BaseTransport)`
+- `input()`: 监听 aioesphomeapi `subscribe_voice_assistant`, UDP 收 16kHz/int16/10ms chunks → 包装 `AudioRawFrame` 推下游 STT
+- `output()`: 收 `TTSAudioRawFrame` → UDP 回推 Core2 喇叭
+- 参考: aioesphomeapi `voice_assistant.py` 源码, ESPHome `voice_assistant` component 文档
+
+**2.3 `pipeline_pipecat.py` 加 `--core2` mode**
+- `build_pipeline` 里根据 `args.core2` 选 `Core2Transport(host=...)` 替换 `LocalAudioTransport`
+- 其余 (STT / radar updater / LLM / TTS) 不动
+
+**2.4 端到端测试**: `python pipeline_pipecat.py --core2`, 触摸 Core2 按键 → 说话 → Core2 喇叭出回应
+
+### Phase 3 (Future Work, 不在本期): 唤醒词
+
+ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_assistant.use_wake_word: true`. 唤醒后自动 listening, 按键变成 fallback. 现阶段先用按键, 论文里写 "wake word integration deferred to future work".
+
+### Phase 进度跟踪
+
+**Phase 1 (基础固件)**
+- [ ] 1.1 ESPHome 装好
+- [ ] 1.2 `esphome/core2.yaml` v1 写好
+- [ ] 1.3 `esphome/secrets.yaml` 写好
+- [ ] 1.4 首次 USB 烧录通过, 屏幕显示 Ready
+- [ ] 1.5 `esp_client.py` 状态推送工作
+
+**Phase 2 (Path B 默认; 时间紧降级 Path A)**
+- [ ] 2.1 yaml 加 voice_assistant + 触摸触发, OTA 通过
+- [ ] 2.2 `Core2Transport` 实现
+- [ ] 2.3 `--core2` 集成进 `pipeline_pipecat.py`
+- [ ] 2.4 端到端语音 demo (tap → 说话 → 回应)
+
+---
+
 ## Day 2: M5Stack Core2 集成
+
+> **⚠️ 已 supersede**: 本节基于 Day 1 的 `pipeline.py` 单线程同步架构, Day 1.5 演进到 pipecat 后不再适用.
+> **保留参考**: 基础 yaml 模板 (Day 2.2.3)、烧录步骤、风险表 仍可引用.
+> **当前执行计划**: 见 [Day 2 (修订): Core2 集成到 pipecat 架构](#day-2-修订-core2-集成到-pipecat-架构).
+
+> **⚠️ 已 supersede**: 本节基于 Day 1 的 `pipeline.py` 单线程同步架构, Day 1.5 演进到 pipecat 后不再适用.
+> **保留参考**: 基础 yaml 模板 (Day 2.2.3)、烧录步骤、风险表 仍可引用.
+> **当前执行计划**: 见 [Day 2 (修订): Core2 集成到 pipecat 架构](#day-2-修订-core2-集成到-pipecat-架构).
 
 **目标**: 用 M5Stack Core2 做唤醒/录音/显示,实现真正的"无屏远场"语音助手。
 
