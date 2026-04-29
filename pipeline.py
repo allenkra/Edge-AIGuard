@@ -30,7 +30,8 @@ PIPER_BIN = os.path.expanduser("~/piper/piper/piper")
 PIPER_MODEL = os.path.expanduser("~/piper/piper/en_US-amy-medium.onnx")
 SAMPLE_RATE = 16000
 RECORD_SECONDS = 5
-RADAR_IP = os.environ.get("RADAR_IP", "192.168.1.100")
+# Use mDNS hostname instead of IP — survives DHCP changes
+RADAR_IP = os.environ.get("RADAR_IP", "seeedstudio-mr60bha2-kit-12fd18.lan")
 ENABLE_TOOLS = os.environ.get("ENABLE_TOOLS", "0") == "1"
 
 

@@ -141,7 +141,7 @@ class RadarReader:
 
 if __name__ == "__main__":
     import sys
-    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.140"
+    host = sys.argv[1] if len(sys.argv) > 1 else "seeedstudio-mr60bha2-kit-12fd18.lan"
     radar = RadarReader(host=host)
     try:
         for _ in range(60):

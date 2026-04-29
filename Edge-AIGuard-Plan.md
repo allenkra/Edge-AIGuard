@@ -176,6 +176,7 @@
 5. **没有 USB 麦克风 + 没有音频输出** → Day 1 用 `--text` + `--no-audio` headless 模式开发,Day 2 由 Core2 提供麦,音频输出待补 (HDMI 音箱 / USB DAC)
 6. **MR60BHA2 `Person Information` binary sensor 只在状态切换时发** → 订阅时刻已是 True 就再也收不到事件; 已通过从 HR 新鲜度反推 presence 解决
 7. **aioesphomeapi 44.x 与 plan 代码不兼容** → `subscribe_states` 不再是 coroutine, `await` 会报 TypeError; 已修
+8. **DHCP 分配的 IP 可能变** → 已切换到 mDNS hostname `seeedstudio-mr60bha2-kit-12fd18.lan` (固件烧死,永远有效); 路由器加 DHCP 保留作为兜底 (待用户操作)
 
 ### ⏳ 待完成
 
