@@ -62,7 +62,10 @@ def build_system_prompt(radar_state):
     else:
         readings = f"Physiological readings unavailable. State: {category}."
 
-    return f"{BASE_PERSONA}\n\n{style}\n\n{readings}\n\n{READING_RULE}"
+    # Order: static → category-conditioned → fully dynamic numerics last.
+    # Putting HR/BR at the very end maximizes KV-cache prefix reuse for
+    # speculative LLM prefill — see test_kv_cache.py scenario 7.
+    return f"{BASE_PERSONA}\n\n{style}\n\n{READING_RULE}\n\n{readings}"
 
 
 if __name__ == "__main__":

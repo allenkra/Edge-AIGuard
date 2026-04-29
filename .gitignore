@@ -8,7 +8,11 @@ venv/
 results*.json
 plot_*.png
 *.wav
+*.raw
 /tmp_*
+
+# downloaded ONNX / Piper voice models — fetched via setup script
+models/
 
 # secrets
 secrets.yaml

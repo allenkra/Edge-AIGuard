@@ -167,6 +167,115 @@
 
 → State-conditioned response adaptation **已验证**, 但 TTFT 远超 plan 目标 (sub-3s),需优化 system prompt 长度。
 
+**KV-cache 复用实验** (2026-04-29, qwen2.5:1.5b, Ollama 0.18.2, 见 `test_kv_cache.py`):
+
+为评估 speculative LLM prefill 路径的可行性,跑了 7 个场景验证 Ollama 在请求间是否复用 KV cache。
+
+| 场景 | Median prefill (ms) | 备注 |
+|------|--------------------:|------|
+| 1 冷基线 (model unload) | 5848 | 含 model load, 仅参考 |
+| 2 暖基线 (无 cache, 145 tok) | **5734** | 后续对照基准 |
+| 3 完美 prefix 命中 (prompt-only) | 579 | **省 89.9%** |
+| 4 static system + user 命中 | 591 | 同上量级 |
+| 5 speculation miss | 765 | 短 prompt (40 tok), 等价 fresh prefill, 无惩罚 |
+| 6 cache decay 5/30/90s | 583/589/582 | **90s idle 内零衰减** |
+| 7 动态 HR 注入 (72→73, 改前) | 3145 | HR 在中间, 仅省 45% |
+| 7' 动态 HR 注入 (改后) | **1925** | HR 挪到末尾, 省 67% (净改善 1.2s) |
+
+→ **结论: GO**。speculative prefill 物理可行,理论上 TTFT 8s → ~1.5s。已完成:
+- ✅ [prompts.py](prompts.py) 重构: 动态 readings 挪到 system prompt 末尾 → 跨 turn 缓存命中从 45% 提升到 67%
+
+下一步: (a) 评估 HR/BR 离散化为 zone (可冲到 ~90% 命中, 但需评估对"精确报数"能力的影响);(b) 引入真流式 ASR (sherpa-onnx) + pipecat 做 speculation 编排。
+
+**sherpa-onnx 流式 ASR 在 Pi 5 验证** (2026-04-29, 见 `bench_sherpa.py`):
+
+模型: `streaming-zipformer-en-2023-06-26` int8 (LibriSpeech, encoder 68 MB)。test_wav 6.62s, chunk=100ms, num_threads=2。
+
+| 指标 | 实测 | Gate | 通过 |
+|------|------:|-----:|:----:|
+| RTF (median of 3 runs) | **0.100** | < 0.8 | ✅ 8× 余量 |
+| 内存 resident | **205 MB** | < 600 MB | ✅ 3× 余量 |
+| First-partial 延迟 | 95 ms | — | — |
+| Per-chunk decode (p95 / max) | 31 / 36 ms | < 320 ms | ✅ |
+| 模型加载时间 | 3.58 s | 启动一次性 | — |
+| 转写正确性 | LibriSpeech Joyce 段完整还原 | — | ✅ |
+
+→ **结论: GO**。RTF 0.1 意味着 ASR 流式只占 ~10% CPU,LLM+TTS 并发空间充裕。下一步进 pipecat 最小验证 (Step 2)。
+
+**pipecat + Silero VAD 在 Pi 5 验证** (2026-04-29, 见 `bench_pipecat.py`):
+
+装包: `sudo apt install portaudio19-dev` + `pip install "pipecat-ai[local,silero,piper,openai]"`。pipecat 1.1.0,Python 3.13.5 兼容。
+
+注意: pipecat 间接把 onnxruntime 从 1.25.1 降到 1.24.4,sherpa-onnx-core 1.13.0 仍可正常加载模型 (已实测)。
+
+| 指标 | 实测 | Gate | 通过 |
+|------|------:|-----:|:----:|
+| pipecat 装包 / 导入 | 1.1.0 | success | ✅ |
+| Pipeline framework 运行 | 4 frames 通过 | ≥ 2 | ✅ |
+| Silero VAD 加载耗时 | 90 ms | < 5 s | ✅ |
+| Silero VAD 检测准确性 | 85% chunks | > 40% | ✅ |
+| Silero VAD RTF | **0.024** (40× realtime) | < 0.5 | ✅ |
+| 总内存 (pipecat+VAD) | 200 MB | < 700 MB | ✅ |
+
+API 注意: `SileroVADAnalyzer` 构造器只存 `_init_sample_rate`,framework 内由 transport 自动调 `set_sample_rate()`;standalone 用法要手动调,否则 `_vad_frames_num_bytes` 未初始化导致 AttributeError。
+
+→ **结论: GO**。Step 1+2 双 GO,可以进 Step 3 写 SherpaOnnxSTTService 集成。
+
+**Step 3 完成: pipecat 端到端全双工 pipeline v1** (2026-04-29, 见 `pipeline_pipecat.py`):
+
+新文件 `pipeline_pipecat.py` (~360 行) 在不动 [pipeline.py](pipeline.py) 的前提下,用 pipecat 1.1.0 串起完整流式链路:
+
+```
+text/mic -> [STT/sherpa-onnx] -> RadarSystemPromptUpdater -> LLMUserAggregator
+         -> OLLamaLLMService -> PiperTTSService -> [speaker/raw_writer] -> LLMAssistantAggregator
+```
+
+核心组件:
+- `SherpaOnnxSTTService(STTService)`: 流式 ASR,emits InterimTranscriptionFrame on partials, TranscriptionFrame on sherpa endpoint detection
+- `RadarSystemPromptUpdater(FrameProcessor)`: 每个 final transcription 触发 `build_system_prompt(radar.get_state())`,直接 mutate `LLMContext._messages[0]["content"]` 保留 KV-cache 静态前缀
+- `TextInputProcessor`: --text 模式 source,模拟 STT 输出 final TranscriptionFrame
+- `RawWriterProcessor`: --no-audio 模式 sink,raw PCM 落 `/tmp/edge_aiguard_last.raw` 兼容旧 pipeline.py 约定
+
+barge-in 通过 `LocalAudioTransportParams.vad_analyzer = SileroVADAnalyzer(...)` 自动接入,VAD 触发 InterruptionFrame 上游传播,自动取消 in-flight TTS/LLM。**零自定义代码**。
+
+API 注意:
+- STTService 跟 VADAnalyzer 一样,framework 用 `start(StartFrame)` 设 `_sample_rate`;standalone 模式直接赋值 `_sample_rate` 即可
+- pipecat 自定义 FrameProcessor 必须显式 `await self.push_frame(frame, direction)` 才能转发,否则 frames 会卡在该节点(StartFrame 卡死整条 pipeline)
+- LLMContext 用 `_messages` 私有属性 mutate (无 public messages property),但 list 是引用,in-place 改 OK
+- PiperTTSService `download_dir=Path("~/piper/piper")` 直接复用 [pipeline.py](pipeline.py) 已有 .onnx,零下载
+
+**Layer 1 smoke (text mode 端到端)**:
+```
+echo -e "hello, what's the capital of France?\nq" | python pipeline_pipecat.py --text --no-audio --no-radar
+```
+✅ Pipeline links 全部建立,StartFrame 流到 sink,Radar updater 触发 (state=normal hr=72 br=16),LLM 生成 "The capital of France is Paris.",Piper TTS 写 123740 字节 (~2.8s 音频) 到 `/tmp/edge_aiguard_last.raw`,EndFrame 干净关闭。
+
+**Layer 2 smoke (STT 流式)**:
+```
+python pipeline_pipecat.py --wav models/streaming-zipformer-en/test_0.wav
+```
+✅ 16+ 个 InterimTranscriptionFrame 渐进输出,sherpa endpoint 在 1.5s+ 静音后触发 TranscriptionFrame final="AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"——与 [bench_sherpa.py](bench_sherpa.py) 等价正确。
+
+**Layer 3 (mic 端到端 + barge-in)**: 等 USB 麦克风到货后跑。
+
+**未做 (留给后续)**:
+- speculative LLM prefill (KV-cache 已验证可行,~89.9% 节省)
+- tools.py function calling 集成 (TODO 标记在 LLM 构造处)
+- HR/BR 离散化为 zone (~85%+ 命中潜力)
+- 旧 [pipeline.py](pipeline.py) 重排 (用户明确保留)
+
+**累计资源占用估算 (满负载, 4 核 Pi 5)**:
+
+| 组件 | 内存 | CPU |
+|------|-----:|----:|
+| sherpa-onnx ASR | 205 MB | ~10% |
+| Silero VAD | 25 MB | ~2.5% |
+| pipecat framework | ~50 MB | <1% |
+| Ollama qwen2.5:1.5b | ~1 GB | 60-80% 峰值 |
+| Piper TTS | ~80 MB | ~13% 峰值 |
+| Python + 系统 | ~200 MB | — |
+| **合计** | **~1.6 GB / 8 GB** | 单核峰值 ~80%, 4 核充裕 |
+
 ### ⚠️ 已知问题
 
 1. **跑 phi3.5:3.8b 时触发红灯欠压** → 必须使用 27W PD 电源 (Day 1 实测 0x0,健康)
@@ -2011,5 +2120,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 1 完成,真雷达验证通过)
-**版本**: v1.2
+**最后更新**: 2026-04-29 (Day 1.5 完成: pipecat 端到端 pipeline v1 跑通, layer 1+2 smoke 全 PASS)
+**版本**: v1.6
