@@ -62,16 +62,19 @@ class RadarReader:
             search = f"{name} {obj_id}"
             now = time.time()
 
-            if any(k in search for k in ["heart", "hr", "pulse", "bpm"]):
+            # match Seeed MR60BHA2 entity names: "Real-time heart rate" (bpm),
+            # "Real-time respiratory rate", "Person Information" (binary)
+            if any(k in search for k in ["heart", "pulse"]):
                 if isinstance(value, (int, float)) and 30 < value < 200:
                     self.hr_window.append((now, float(value)))
-            elif any(k in search for k in ["breath", "br", "respiration"]):
+            elif any(k in search for k in ["breath", "respir"]):
                 if isinstance(value, (int, float)) and 5 < value < 40:
                     self.br_window.append((now, float(value)))
-            elif any(k in search for k in ["presence", "occupancy", "detected"]):
+            elif any(k in search for k in ["presence", "occupancy", "person", "detected"]):
                 self.presence = bool(value)
 
-        await client.subscribe_states(on_state)
+        # aioesphomeapi 44.x: subscribe_states is not a coroutine
+        client.subscribe_states(on_state)
 
         while self.running:
             await asyncio.sleep(1)
@@ -91,11 +94,23 @@ class RadarReader:
                 "source": "fake",
             }
 
-        if not self.hr_window:
+        # Drop samples older than 15s
+        now = time.time()
+        while self.hr_window and now - self.hr_window[0][0] > 15:
+            self.hr_window.popleft()
+        while self.br_window and now - self.br_window[0][0] > 15:
+            self.br_window.popleft()
+
+        # Presence: derive from HR recency (binary sensor on this firmware
+        # only fires on transition, so we miss the initial state)
+        has_data = bool(self.hr_window)
+        presence = has_data or self.presence
+
+        if not has_data:
             return {
                 "hr": None, "br": None,
-                "presence": self.presence,
-                "category": "no_user" if not self.presence else "unknown",
+                "presence": presence,
+                "category": "no_user" if not presence else "unknown",
                 "source": "real",
             }
 
@@ -105,22 +120,20 @@ class RadarReader:
         return {
             "hr": round(hr, 1),
             "br": round(br, 1),
-            "presence": self.presence,
+            "presence": True,
             "category": self._classify(hr, br),
             "source": "real",
         }
 
     def _classify(self, hr, br):
-        if not self.presence and not self.fake_mode:
-            return "no_user"
+        # exercising check first: high HR dominates regardless of BR
+        if hr >= 110:
+            return "exercising"
         if hr > 90 and br > 20:
             return "stressed"
-        elif hr > 110:
-            return "exercising"
-        elif hr < 65 and br < 14:
+        if hr < 65 and br < 14:
             return "relaxed"
-        else:
-            return "normal"
+        return "normal"
 
     def stop(self):
         self.running = False
@@ -128,7 +141,7 @@ class RadarReader:
 
 if __name__ == "__main__":
     import sys
-    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.100"
+    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.140"
     radar = RadarReader(host=host)
     try:
         for _ in range(60):

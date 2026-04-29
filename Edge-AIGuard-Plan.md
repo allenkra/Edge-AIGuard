@@ -135,6 +135,18 @@
 - [x] **冒烟测试**: text mode + fake radar 验证 state-conditioned response 工作 (normal "The capital of France is Paris." → stressed "Paris.")
 - [x] git 仓库初始化 + push 到 `git@github.com:allenkra/Edge-AIGuard.git`
 
+**Day 1.2 雷达真机验证 (2026-04-29)**
+- [x] MR60BHA2 Kit WiFi 配通 (FortenLLLord), nmap 扫到 IP `192.168.1.140`
+- [x] mDNS 名: `seeedstudio-mr60bha2-kit-12fd18.lan` (路由用 `.lan` 后缀)
+- [x] ESPHome API 实体发现, 7 个实体, 关键三个: `Real-time heart rate` (bpm), `Real-time respiratory rate`, `Person Information` (binary)
+- [x] 修复 `radar.py`: aioesphomeapi 44.x `subscribe_states` 不再是 coroutine; entity matcher 改 `respir`/`person` 词根
+- [x] 修复 presence 推导: 从 HR 数据 recency 反推 (binary sensor 只在状态切换时发,初始状态丢失)
+- [x] 修复 `_classify`: 把 `exercising` (HR≥110) 排到 `stressed` 前面
+- [x] 真机数据验证: HR 86-117 bpm, BR 6-20/min, distance 40-120cm 实时流入
+- [x] **完整集成测试** (text + 真雷达 + 流式 LLM):
+  - "How am I doing?" (presence=False 时) → "I can't tell from your current state..." 不编数字 ✅
+  - "What is my heart rate?" (HR=86) → "Your heart rate is 86 bpm." 精确报数 ✅
+
 ### 📊 已采集的基线数据
 
 **Day 0 距离题基线** (参考真实距离: ~11650 km):
@@ -162,13 +174,13 @@
 3. **`ollama` 目录命名冲突** → 虚拟环境也叫 `~/ollama`,不影响功能但注意区分
 4. **TTFT 8s 偏慢 (Day 1 实测)** → plan 目标 sub-3s 未达成,瓶颈是 system prompt prefill (~150 token)。优化方向: 精简 prompt / 试 0.5b 模型 / 预热模型
 5. **没有 USB 麦克风 + 没有音频输出** → Day 1 用 `--text` + `--no-audio` headless 模式开发,Day 2 由 Core2 提供麦,音频输出待补 (HDMI 音箱 / USB DAC)
+6. **MR60BHA2 `Person Information` binary sensor 只在状态切换时发** → 订阅时刻已是 True 就再也收不到事件; 已通过从 HR 新鲜度反推 presence 解决
+7. **aioesphomeapi 44.x 与 plan 代码不兼容** → `subscribe_states` 不再是 coroutine, `await` 会报 TypeError; 已修
 
 ### ⏳ 待完成
 
-**Day 1 收尾 (阻塞在硬件)**
-- [ ] 配置 MR60BHA2 Kit WiFi 并拿到 IP (1.2.1-1.2.2)
-- [ ] `radar.py` 真机验证 (1.2.3 + 1.3.1 真机部分)
-- [ ] TTFT 优化到 sub-3s
+**Day 1 收尾**
+- [ ] TTFT 优化到 sub-3s (当前 5-8s, 取决于是否冷启动)
 
 **Day 2**
 - [ ] 配置 M5Stack Core2 (ESPHome)
@@ -1971,13 +1983,14 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ## 进度追踪
 
-### Day 1 ◐ (主体完成,阻塞硬件)
+### Day 1 ✅ (主体完成,仅余 TTFT 优化)
 - [x] 环境就绪 (依赖装好, Ollama 服务跑着)
 - [x] Piper TTS 验证可用 (real-time factor 0.13)
-- [ ] 雷达 Kit IP 找到, API 测试通过 (**阻塞: 等用户配 WiFi**)
-- [◐] `radar.py` 跑通 (代码就绪, 待真机验证)
-- [x] `pipeline.py` 命令行版完整跑通 (text mode, voice mode 待麦克风)
+- [x] 雷达 Kit IP 找到 (`192.168.1.140`), API 测试通过
+- [x] `radar.py` 跑通 (真机 HR/BR/presence 实时数据, presence 从 HR 新鲜度反推)
+- [x] `pipeline.py` 命令行版完整跑通 (text mode + 真雷达, voice mode 待麦克风)
 - [x] Fake mode 切换 → 回答风格变化明显 ("The capital of France is Paris." → "Paris.")
+- [x] **真雷达集成验证**: 不主动报数字, 被问就准确报 ("Your heart rate is 86 bpm.")
 
 ### Day 2 ☐
 - [ ] M5Stack Core2 驱动装好,Arduino HelloWorld 验证
@@ -1997,5 +2010,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 1 主体完成)
-**版本**: v1.1
+**最后更新**: 2026-04-29 (Day 1 完成,真雷达验证通过)
+**版本**: v1.2
