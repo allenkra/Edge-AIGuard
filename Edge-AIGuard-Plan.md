@@ -234,8 +234,8 @@ aplay /tmp/test_rec.wav
 #### 1.1.5 创建项目目录
 
 ```bash
-mkdir -p ~/edge-aiguard
-cd ~/edge-aiguard
+mkdir -p ~/Edge-AIGuard
+cd ~/Edge-AIGuard
 ```
 
 ### Day 1.2 - 雷达 Kit 配置 (中午)
@@ -292,7 +292,7 @@ python /tmp/test_radar.py
 
 #### 1.3.1 雷达驱动 `radar.py`
 
-创建文件 `~/edge-aiguard/radar.py`:
+创建文件 `~/Edge-AIGuard/radar.py`:
 
 ```python
 """
@@ -439,7 +439,7 @@ if __name__ == "__main__":
 
 #### 1.3.2 Prompt 模板 `prompts.py`
 
-创建文件 `~/edge-aiguard/prompts.py`:
+创建文件 `~/Edge-AIGuard/prompts.py`:
 
 ```python
 """
@@ -512,7 +512,7 @@ def build_system_prompt(radar_state):
 
 #### 1.3.3 主控 `pipeline.py`
 
-创建文件 `~/edge-aiguard/pipeline.py`:
+创建文件 `~/Edge-AIGuard/pipeline.py`:
 
 ```python
 """
@@ -679,7 +679,7 @@ if __name__ == "__main__":
 #### 1.3.4 第一次运行
 
 ```bash
-cd ~/edge-aiguard
+cd ~/Edge-AIGuard
 source ~/ollama/bin/activate
 ollama serve > ~/ollama.log 2>&1 &
 sleep 2
@@ -701,7 +701,7 @@ RADAR_IP=192.168.1.100 python pipeline.py
 
 主路径 `pipeline.py` 继续用 `/api/generate` 流式推理,不开 tools。Tool 路径作为独立模块,Day 3 评测主线后视时间决定是否激活做额外 demo。
 
-创建文件 `~/edge-aiguard/tools.py`:
+创建文件 `~/Edge-AIGuard/tools.py`:
 
 ```python
 """
@@ -1155,7 +1155,7 @@ api:
 
 #### 2.4.2 Pi 端调用 ESPHome API
 
-新建 `~/edge-aiguard/esp_client.py`:
+新建 `~/Edge-AIGuard/esp_client.py`:
 
 ```python
 """
@@ -1308,7 +1308,7 @@ micro_wake_word:
 
 #### 3.2.1 评测脚本 `eval.py`
 
-创建 `~/edge-aiguard/eval.py`:
+创建 `~/Edge-AIGuard/eval.py`:
 
 ```python
 """
@@ -1418,7 +1418,7 @@ if __name__ == "__main__":
 跑评测:
 
 ```bash
-cd ~/edge-aiguard
+cd ~/Edge-AIGuard
 source ~/ollama/bin/activate
 python eval.py
 # 大约 15-30 分钟跑完 40 个样本
@@ -1426,7 +1426,7 @@ python eval.py
 
 #### 3.2.2 数据可视化 `plot.py`
 
-创建 `~/edge-aiguard/plot.py`:
+创建 `~/Edge-AIGuard/plot.py`:
 
 ```python
 """
@@ -1627,10 +1627,10 @@ Exercising & XXX & X.X \\
 
 ## 完整文件清单
 
-### Pi 5 上 (`~/edge-aiguard/`)
+### Pi 5 上 (`~/Edge-AIGuard/`)
 
 ```
-~/edge-aiguard/
+~/Edge-AIGuard/
 ├── pipeline.py          # 主控:ASR/LLM/TTS/HTTP server
 ├── radar.py             # MR60BHA2 Kit 客户端
 ├── prompts.py           # 状态-prompt 模板
@@ -1894,7 +1894,7 @@ sleep 2
 source ~/ollama/bin/activate
 
 # 启动语音助手
-cd ~/edge-aiguard
+cd ~/Edge-AIGuard
 RADAR_IP=192.168.1.100 python pipeline.py
 ```
 

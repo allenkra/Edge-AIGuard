@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# eval / plot artifacts (regenerated)
+results*.json
+plot_*.png
+*.wav
+/tmp_*
+
+# secrets
+secrets.yaml
+.env
