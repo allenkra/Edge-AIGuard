@@ -105,22 +105,39 @@
 
 ### ✅ 已完成
 
+**初始环境 (Day 0)**
 - [x] Pi 5 系统安装 (Raspberry Pi OS Bookworm)
 - [x] SSH 远程访问 (主机名 `hw3100`)
 - [x] Ollama v0.18.2 安装到 `/usr/bin/ollama`
-- [x] 5 个模型就位 (位于 `~/.ollama/models/`):
+- [x] Swap 扩到 6 GB (zram 2GB + /var/swap 4GB)
+- [x] `/etc/fstab` 加入 `/var/swap none swap sw 0 0`, `/etc/rpi/swap.conf.d/fixed.conf` 写入 `[File] FixedSizeMiB=4096`
+- [x] Python 虚拟环境 `~/ollama` 已创建
+
+**模型 (Day 0 + Day 1)**
+- [x] 已装模型 (位于 `~/.ollama/models/`):
   - llama3.2:1b (1.3 GB)
   - llama3.2:3b (2.0 GB)
   - gemma2:2b (1.6 GB)
-  - phi3.5:3.8b (2.3 GB)
-  - llava-phi3:3.8b (2.9 GB)
-- [x] Swap 扩到 6 GB (zram 2GB + /var/swap 4GB)
-- [x] 配置文件 `/etc/rpi/swap.conf.d/fixed.conf` 写入 `[File] FixedSizeMiB=4096`
-- [x] `/etc/fstab` 加入 `/var/swap none swap sw 0 0`
-- [x] Python 虚拟环境 `~/ollama` 已创建
-- [x] 1B/3B/2B 模型基线性能数据已采集
+  - phi3.5:3.8b (2.2 GB)
+  - **qwen2.5:1.5b (986 MB)** ← Day 1.1 新增, 主要推理模型
+- [x] llava-phi3:3.8b 删除 (释放 2.9 GB,本项目无需视觉)
+- [x] 1B/3B/2B 模型基线性能数据已采集 (见下表)
+
+**Day 1 实施 (2026-04-29)**
+- [x] Day 1.1.1 电源/温度健康 (`throttled=0x0`, 52.7°C)
+- [x] Day 1.1.2 Python 依赖装好 (faster-whisper 1.2.1, ctranslate2 4.7.1, aioesphomeapi 44.22, sounddevice, scipy, flask, matplotlib)
+- [x] Day 1.1.3 Piper TTS + Amy 语音模型 (real-time factor 0.13, **7.5× realtime**)
+- [x] Day 1.1.5 项目目录建立 (后改为 `~/Edge-AIGuard/`,与 git 仓库一致)
+- [x] Day 1.3.1 `radar.py` 编写 (含 fake_mode, 待真机验证)
+- [x] Day 1.3.2 `prompts.py` 编写 (HR/BR 实时注入)
+- [x] Day 1.3.3 `pipeline.py` 编写 (含 `--text/--no-audio/--no-radar` headless fallback)
+- [x] Day 1.3.5 `tools.py` 编写 (tool calling 接口预留, `ENABLE_TOOLS=1` 启用)
+- [x] **冒烟测试**: text mode + fake radar 验证 state-conditioned response 工作 (normal "The capital of France is Paris." → stressed "Paris.")
+- [x] git 仓库初始化 + push 到 `git@github.com:allenkra/Edge-AIGuard.git`
 
 ### 📊 已采集的基线数据
+
+**Day 0 距离题基线** (参考真实距离: ~11650 km):
 
 | 模型 | 参数量 | Eval Rate | 距离题答案 | 准确性 |
 |------|--------|-----------|-----------|--------|
@@ -129,23 +146,40 @@
 | gemma2:2b | 2.6B | 6.8 tok/s | 8400 km | 偏低 -3250 km |
 | phi3.5:3.8b | 3.8B | 4.77 tok/s | 12309 km | 最准 +660 km |
 
-参考真实距离: ~11650 km
+**Day 1 冒烟测试** (qwen2.5:1.5b, system prompt ~150 token):
+
+| 状态 | Query | Response | TTFT | LLM total |
+|------|-------|----------|------|-----------|
+| normal (HR=72) | "What is the capital of France?" | "The capital of France is Paris." | 8.41s | 9.76s |
+| stressed (HR=95) | (same) | "Paris." | 7.44s | 8.12s |
+
+→ State-conditioned response adaptation **已验证**, 但 TTFT 远超 plan 目标 (sub-3s),需优化 system prompt 长度。
 
 ### ⚠️ 已知问题
 
-1. **跑 phi3.5:3.8b 时触发红灯欠压** → 必须使用 27W PD 电源
-2. **SD 卡只剩 4.1 GB** (85% 已用) → 需要谨慎管理空间
-3. **`ollama` 目录命名冲突** → 虚拟环境也叫 `~/ollama`，不影响功能但注意区分
+1. **跑 phi3.5:3.8b 时触发红灯欠压** → 必须使用 27W PD 电源 (Day 1 实测 0x0,健康)
+2. **SD 卡空间** → Day 1 删 llava-phi3 后剩 6.0 GB,暂时宽松,装完所有依赖+模型后约剩 5 GB
+3. **`ollama` 目录命名冲突** → 虚拟环境也叫 `~/ollama`,不影响功能但注意区分
+4. **TTFT 8s 偏慢 (Day 1 实测)** → plan 目标 sub-3s 未达成,瓶颈是 system prompt prefill (~150 token)。优化方向: 精简 prompt / 试 0.5b 模型 / 预热模型
+5. **没有 USB 麦克风 + 没有音频输出** → Day 1 用 `--text` + `--no-audio` headless 模式开发,Day 2 由 Core2 提供麦,音频输出待补 (HDMI 音箱 / USB DAC)
 
 ### ⏳ 待完成
 
-- [ ] 确认电源充足 (`vcgencmd get_throttled` = `0x0`)
-- [ ] 安装 Day 1 Python 依赖
-- [ ] 下载 Piper TTS
-- [ ] 配置 MR60BHA2 Kit WiFi
+**Day 1 收尾 (阻塞在硬件)**
+- [ ] 配置 MR60BHA2 Kit WiFi 并拿到 IP (1.2.1-1.2.2)
+- [ ] `radar.py` 真机验证 (1.2.3 + 1.3.1 真机部分)
+- [ ] TTFT 优化到 sub-3s
+
+**Day 2**
 - [ ] 配置 M5Stack Core2 (ESPHome)
-- [ ] 编写主控代码
-- [ ] 集成测试 + 评测 + 录像
+- [ ] 麦克风录音 + HTTP 上传到 Pi
+- [ ] Pi 端状态推送到 Core2 显示
+
+**Day 3**
+- [ ] 端到端 4 个场景测试
+- [ ] `eval.py` + 评测数据
+- [ ] 三张图 + Demo 视频
+- [ ] 论文实验数据填入
 
 ---
 
@@ -1937,13 +1971,13 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ## 进度追踪
 
-### Day 1 ☐
-- [ ] 环境就绪 (依赖装好,Ollama 服务跑着)
-- [ ] Piper TTS 验证可用
-- [ ] 雷达 Kit IP 找到,API 测试通过
-- [ ] `radar.py` 跑通 (能打印实时数据)
-- [ ] `pipeline.py` 命令行版完整跑通
-- [ ] Fake mode 切换 → 回答风格变化明显
+### Day 1 ◐ (主体完成,阻塞硬件)
+- [x] 环境就绪 (依赖装好, Ollama 服务跑着)
+- [x] Piper TTS 验证可用 (real-time factor 0.13)
+- [ ] 雷达 Kit IP 找到, API 测试通过 (**阻塞: 等用户配 WiFi**)
+- [◐] `radar.py` 跑通 (代码就绪, 待真机验证)
+- [x] `pipeline.py` 命令行版完整跑通 (text mode, voice mode 待麦克风)
+- [x] Fake mode 切换 → 回答风格变化明显 ("The capital of France is Paris." → "Paris.")
 
 ### Day 2 ☐
 - [ ] M5Stack Core2 驱动装好,Arduino HelloWorld 验证
@@ -1963,5 +1997,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-28
-**版本**: v1.0
+**最后更新**: 2026-04-29 (Day 1 主体完成)
+**版本**: v1.1
