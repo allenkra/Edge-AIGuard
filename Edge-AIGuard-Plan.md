@@ -1281,12 +1281,12 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 
 ### Phase 进度跟踪
 
-**Phase 1 (基础固件)**
+**Phase 1 (基础固件)** ✅ **完成**
 - [x] 1.1 ESPHome 2026.4.3 装好 (`~/esphome-env`, Python 3.13 直接兼容, 无需 fallback)
 - [x] 1.2 `esphome/core2.yaml` v1 写好, `esphome config` 通过 (mipi_spi M5CORE2 + axp192 sensor + ft63x6 touch)
-- [◐] 1.3 `esphome/secrets.yaml` 已生成 (API/OTA key 写死), WiFi 密码占位符待用户 nano 填写
-- [ ] 1.4 首次 USB 烧录通过, 屏幕显示 Ready
-- [ ] 1.5 `esp_client.py` 状态推送工作
+- [x] 1.3 `esphome/secrets.yaml` 完成 (API key + OTA + WiFi)
+- [x] 1.4 首次 USB 烧录通过 (`/dev/ttyACM0`, 51% flash 占用), Core2 上 WiFi 拿到 `192.168.1.178`, mDNS `edge-aiguard-core2.local`, `update_status` 服务调用验证通过
+- [x] 1.5 `esp_client.py` 状态推送工作: `Core2Client` async + `Core2StatusUpdater` FrameProcessor 集成进 `pipeline_pipecat.py` (`--core2` flag), 端到端 "Hello" → LLM → TTS 全链路状态切换正常
 
 **Phase 2 (Path B 默认; 时间紧降级 Path A)**
 - [ ] 2.1 yaml 加 voice_assistant + 触摸触发, OTA 通过
@@ -2436,5 +2436,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 2 Phase 1.1+1.2 完成, ESPHome 装好 + core2.yaml validate 通过)
-**版本**: v1.7
+**最后更新**: 2026-04-29 (Day 2 Phase 1 ✅ 完成: 烧录通过, Core2 显示 + 状态推送全链路工作)
+**版本**: v1.8

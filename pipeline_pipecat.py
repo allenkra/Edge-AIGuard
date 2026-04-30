@@ -54,6 +54,7 @@ from pipecat.transports.local.audio import (
 from pipecat.utils.time import time_now_iso8601
 
 sys.path.insert(0, str(Path(__file__).parent))
+from esp_client import Core2Client, Core2StatusUpdater, periodic_radar_push
 from prompts import build_system_prompt
 from radar import RadarReader
 
@@ -67,6 +68,8 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
 RADAR_IP = os.environ.get("RADAR_IP", "seeedstudio-mr60bha2-kit-12fd18.lan")
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "en_US-amy-medium")
 PIPER_DIR = Path(os.environ.get("PIPER_DIR", "~/piper/piper")).expanduser()
+CORE2_HOST = os.environ.get("CORE2_HOST", "edge-aiguard-core2.local")
+CORE2_NOISE_PSK = os.environ.get("CORE2_NOISE_PSK", "")
 
 NO_AUDIO_OUT = Path("/tmp/edge_aiguard_last.raw")
 SAMPLE_RATE = 16000
@@ -249,7 +252,7 @@ class RawWriterProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def build_pipeline(args, radar):
+def build_pipeline(args, radar, core2_client=None):
     """Construct pipeline based on args. Returns (pipeline, task, runner, refs)."""
     context = LLMContext(messages=[])
     pair = LLMContextAggregatorPair(context)
@@ -303,6 +306,12 @@ def build_pipeline(args, radar):
         tail = [raw_writer, assistant_agg]
     else:
         tail = [transport.output(), assistant_agg]
+
+    # Core2 status display tap-in (after assistant_agg so it observes the full
+    # frame stream in both directions without altering ordering of any other
+    # processor). No-op when --core2 is not set.
+    if core2_client is not None:
+        tail.append(Core2StatusUpdater(client=core2_client, get_state=radar.get_state))
 
     pipeline = Pipeline(head + middle + tail)
     task = PipelineTask(pipeline, idle_timeout_secs=300)
@@ -397,6 +406,9 @@ def parse_args():
     p.add_argument("--no-radar", action="store_true",
                    help="use radar fake_mode='normal' instead of real ESPHome")
     p.add_argument("--wav", help="STT smoke test: feed WAV file and exit")
+    p.add_argument("--core2", action="store_true",
+                   help="push pipeline status + radar to Core2 display "
+                        "(needs CORE2_HOST and CORE2_NOISE_PSK env vars)")
     return p.parse_args()
 
 
@@ -408,14 +420,28 @@ async def main():
         return await wav_smoke_test(args)
 
     radar = load_radar(args)
-    pipeline, task, runner, refs = build_pipeline(args, radar)
+
+    core2_client = None
+    core2_radar_task = None
+    if args.core2:
+        if not CORE2_NOISE_PSK:
+            logger.error("--core2 requires CORE2_NOISE_PSK env var (32-byte base64)")
+            return
+        core2_client = Core2Client(CORE2_HOST, CORE2_NOISE_PSK)
+        await core2_client.start()
+        core2_radar_task = asyncio.create_task(
+            periodic_radar_push(core2_client, radar.get_state)
+        )
+
+    pipeline, task, runner, refs = build_pipeline(args, radar, core2_client=core2_client)
 
     print(
         f"Edge-AIGuard pipecat pipeline starting "
         f"(LLM={LLM_MODEL}, "
         f"radar={'fake' if args.no_radar else RADAR_IP}, "
         f"mode={'text' if args.text else 'mic'}, "
-        f"audio={'off' if args.no_audio else 'on'})"
+        f"audio={'off' if args.no_audio else 'on'}, "
+        f"core2={'on@' + CORE2_HOST if args.core2 else 'off'})"
     )
 
     try:
@@ -424,6 +450,14 @@ async def main():
         else:
             await runner.run(task)
     finally:
+        if core2_radar_task:
+            core2_radar_task.cancel()
+            try:
+                await core2_radar_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if core2_client:
+            await core2_client.close()
         if hasattr(radar, "stop") and getattr(radar, "running", False):
             radar.stop()
 
