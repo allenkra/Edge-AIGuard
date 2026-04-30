@@ -1282,9 +1282,9 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 ### Phase 进度跟踪
 
 **Phase 1 (基础固件)**
-- [ ] 1.1 ESPHome 装好
-- [ ] 1.2 `esphome/core2.yaml` v1 写好
-- [ ] 1.3 `esphome/secrets.yaml` 写好
+- [x] 1.1 ESPHome 2026.4.3 装好 (`~/esphome-env`, Python 3.13 直接兼容, 无需 fallback)
+- [x] 1.2 `esphome/core2.yaml` v1 写好, `esphome config` 通过 (mipi_spi M5CORE2 + axp192 sensor + ft63x6 touch)
+- [◐] 1.3 `esphome/secrets.yaml` 已生成 (API/OTA key 写死), WiFi 密码占位符待用户 nano 填写
 - [ ] 1.4 首次 USB 烧录通过, 屏幕显示 Ready
 - [ ] 1.5 `esp_client.py` 状态推送工作
 
