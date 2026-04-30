@@ -202,6 +202,12 @@ speaker:
     i2s_dout_pin: GPIO2
     sample_rate: 22050
     bits_per_sample: 16bit
+    # Default 500ms is too tight: Pi sends TTS_STREAM_START then audio
+    # in chunks ~70ms apart, but voice_assistant's loop has its own
+    # latency between on_audio and play(), so 500ms idle exit happens
+    # before the first byte reaches the speaker ring buffer. Bump to 30s
+    # so the speaker task waits patiently for chunks during the whole TTS.
+    timeout: 30s
 
 # voice_assistant streams audio in/out via API to Pi-side Core2Transport.
 voice_assistant:

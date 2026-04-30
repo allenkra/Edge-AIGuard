@@ -93,7 +93,10 @@ class Core2OutputTransport(FrameProcessor):
             self._tts_streaming = True
         elif isinstance(frame, TTSAudioRawFrame):
             logger.debug(f"[core2.audio.out] TTSAudioRawFrame: {len(frame.audio)} bytes")
-            self._transport._send_audio(frame.audio)
+            # Await the chunked send instead of fire-and-forget so
+            # TTSStoppedFrame can't race ahead and emit RUN_END while
+            # chunks are still in flight (which makes Core2 drop them).
+            await self._transport._send_audio_chunked_inline(frame.audio)
         elif isinstance(frame, TTSStoppedFrame):
             logger.info("[core2.audio.out] TTSStoppedFrame -> TTS_STREAM_END + TTS_END + RUN_END")
             if self._tts_streaming:
@@ -169,11 +172,24 @@ class Core2Transport:
         except Exception as e:
             logger.warning(f"[core2.audio] event send failed ({event_type}): {e!r}")
 
-    def _send_audio(self, audio_bytes: bytes):
+    async def _send_audio_chunked_inline(self, audio_bytes: bytes):
+        # ESPHome voice_assistant.cpp: SPEAKER_BUFFER_SIZE = 16 * 1024 (16KB).
+        # on_audio drops bytes with "Cannot receive audio, buffer is full"
+        # when the chunk can't fit. A whole TTS sentence from Piper
+        # (35KB-150KB) overflows in one go, so we chunk + pace.
+        # 4KB per chunk = ~93ms at 22050Hz int16 mono. Sleep 70ms between
+        # chunks (slightly slower than realtime drain to let speaker keep up
+        # without underflowing — DMA underflow makes the speaker exit too).
         if self._client is None or self._closed:
             return
+        CHUNK = 4096
+        SLEEP_S = 0.07
         try:
-            self._client.send_voice_assistant_audio(audio_bytes)
+            for i in range(0, len(audio_bytes), CHUNK):
+                if self._closed or self._client is None:
+                    break
+                self._client.send_voice_assistant_audio(audio_bytes[i:i + CHUNK])
+                await asyncio.sleep(SLEEP_S)
         except Exception as e:
             logger.warning(f"[core2.audio] audio send failed: {e!r}")
 
