@@ -321,7 +321,7 @@ def build_pipeline(args, radar, core2_client=None, core2_audio_transport=None):
         tail.append(Core2StatusUpdater(client=core2_client, get_state=radar.get_state))
 
     pipeline = Pipeline(head + middle + tail)
-    task = PipelineTask(pipeline, idle_timeout_secs=300)
+    task = PipelineTask(pipeline, idle_timeout_secs=1800)
     runner = PipelineRunner(handle_sigint=False)
 
     refs = {

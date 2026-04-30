@@ -24,9 +24,9 @@ from aioesphomeapi import APIClient, ReconnectLogic
 from aioesphomeapi.model import VoiceAssistantEventType
 
 from pipecat.frames.frames import (
-    AudioRawFrame,
     EndFrame,
     Frame,
+    InputAudioRawFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
@@ -56,7 +56,11 @@ class Core2InputTransport(FrameProcessor):
     async def push_audio(self, audio_bytes: bytes):
         if not self._started:
             return
-        frame = AudioRawFrame(
+        # InputAudioRawFrame (not AudioRawFrame mixin) carries the Frame
+        # metadata (id, pts, name) that pipecat observers and downstream
+        # processors expect. Using the bare mixin caused observer crashes
+        # and STT to silently drop chunks.
+        frame = InputAudioRawFrame(
             audio=audio_bytes,
             sample_rate=self._sample_rate,
             num_channels=1,
@@ -76,12 +80,18 @@ class Core2OutputTransport(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TTSStartedFrame):
+            logger.info("[core2.audio.out] TTSStartedFrame -> TTS_START + TTS_STREAM_START")
+            # voice_assistant protocol expects INTENT_END before TTS_START so
+            # the device's pipeline state machine moves out of "intent" phase.
+            self._transport._send_event(VA.VOICE_ASSISTANT_INTENT_END)
             self._transport._send_event(VA.VOICE_ASSISTANT_TTS_START)
             self._transport._send_event(VA.VOICE_ASSISTANT_TTS_STREAM_START)
             self._tts_streaming = True
         elif isinstance(frame, TTSAudioRawFrame):
+            logger.debug(f"[core2.audio.out] TTSAudioRawFrame: {len(frame.audio)} bytes")
             self._transport._send_audio(frame.audio)
         elif isinstance(frame, TTSStoppedFrame):
+            logger.info("[core2.audio.out] TTSStoppedFrame -> TTS_STREAM_END + TTS_END + RUN_END")
             if self._tts_streaming:
                 self._transport._send_event(VA.VOICE_ASSISTANT_TTS_STREAM_END)
                 self._transport._send_event(VA.VOICE_ASSISTANT_TTS_END)
@@ -173,8 +183,10 @@ class Core2Transport:
         # lambda fires and the user sees the state change immediately.
         self._send_event(VA.VOICE_ASSISTANT_RUN_START)
         self._send_event(VA.VOICE_ASSISTANT_STT_START)
-        # Returning None → use API audio path (handle_audio callback).
-        return None
+        # aioesphomeapi treats None as an error and sends back error=True.
+        # For API audio (handle_audio callback) the UDP port is irrelevant;
+        # return 0 to signal "session accepted, no UDP listener needed".
+        return 0
 
     async def _on_va_stop(self, server_side: bool):
         logger.info(f"[core2.audio] VA stop (server_side={server_side})")
@@ -185,6 +197,14 @@ class Core2Transport:
 
     async def _on_va_audio(self, audio_bytes: bytes):
         # Mic chunk from Core2; push into pipecat input.
+        # Log every 50th chunk so we don't flood (chunks ~10ms = 100/sec).
+        self._chunks_in = getattr(self, "_chunks_in", 0) + 1
+        if self._chunks_in % 50 == 1:
+            logger.info(f"[core2.audio.in] chunk #{self._chunks_in} ({len(audio_bytes)} bytes)")
+        # Dump first 200 chunks (~6.4s) to /tmp/core2_mic.raw for debugging
+        if self._chunks_in <= 200:
+            with open("/tmp/core2_mic.raw", "ab") as f:
+                f.write(audio_bytes)
         await self._input.push_audio(audio_bytes)
 
     async def close(self):

@@ -65,6 +65,11 @@ api:
             id(status_text) = new_status;
             id(hr_value) = new_hr;
             id(br_value) = new_br;
+    # Pi-side fallback for the dead touch IC: triggers voice_assistant.start
+    # so we don't depend on FT6336 (currently unpowered / unreachable).
+    - action: start_listening
+      then:
+        - voice_assistant.start
 
 ota:
   - platform: esphome
