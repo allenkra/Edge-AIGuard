@@ -8,10 +8,27 @@ esphome:
     lib_deps:
       - lewisxhe/XPowersLib@^0.2.4
   on_boot:
-    priority: 600
+    # priority < 600 so this runs AFTER axp2101 setup (which is at DATA=600)
+    priority: 500
     then:
       - lambda: |-
           id(status_text) = "Booting...";
+      - delay: 200ms
+      # lboue's M5CORE2 init leaves ALDO3 disabled ("This is the speaker"
+      # in the source). NS4168 audio amp on Core2 V1.1 needs ALDO3 powered
+      # for any sound to come out. Set voltage 3.3V then flip enable bit.
+      - lambda: |-
+          // Set ALDO3 voltage to 3.3V (register 0x95, value 0x1C = 28 = 500+28*100mV)
+          id(axp_id)->write_byte(0x95, 0x1C);
+          // Enable ALDO3 (register 0x90 bit 2)
+          uint8_t reg = 0;
+          if (id(axp_id)->read_byte(0x90, &reg)) {
+            reg |= (1 << 2);
+            id(axp_id)->write_byte(0x90, reg);
+            ESP_LOGI("init", "ALDO3 enabled, 0x90 = 0x%02X", reg);
+          } else {
+            ESP_LOGE("init", "Failed to read AXP2101 reg 0x90");
+          }
 
 esp32:
   board: m5stack-core2
@@ -157,11 +174,50 @@ touchscreen:
     interrupt_pin: GPIO39
     id: m5_touch
 
-# PHASE 2 ROLLED BACK — i2s_audio + voice_assistant suspected of bricking
-# the LCD path. Re-enable incrementally after we confirm Phase 1 still works.
-# Backup of the audio-enabled version: core2_v2_audio.yaml.
+# Phase 2 (incremental rebuild after AXP2101 baseline restored):
+# Step 2 — add I2S microphone only. Speaker + voice_assistant follow.
 
-# Phase 1 fallback: touch logs only, no voice_assistant binding.
+i2s_audio:
+  i2s_lrclk_pin: GPIO0
+  i2s_bclk_pin: GPIO12
+
+microphone:
+  - platform: i2s_audio
+    id: m5_mic
+    i2s_din_pin: GPIO34
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+    bits_per_sample: 16bit
+
+speaker:
+  - platform: i2s_audio
+    id: m5_speaker
+    dac_type: external   # NS4168 amp on Core2 V1.1, powered via ALDO3
+    i2s_dout_pin: GPIO2
+    sample_rate: 22050
+    bits_per_sample: 16bit
+
+# voice_assistant streams audio in/out via API to Pi-side Core2Transport.
+voice_assistant:
+  microphone: m5_mic
+  speaker: m5_speaker
+  noise_suppression_level: 2
+  use_wake_word: false
+  on_listening:
+    - lambda: |-
+        id(status_text) = "Listening...";
+  on_tts_start:
+    - lambda: |-
+        id(status_text) = "Speaking...";
+  on_end:
+    - lambda: |-
+        id(status_text) = "Ready";
+  on_error:
+    - lambda: |-
+        id(status_text) = "Error";
+        ESP_LOGE("va", "%s: %s", code.c_str(), message.c_str());
+
 binary_sensor:
   - platform: touchscreen
     name: "Touch Trigger"
@@ -172,4 +228,4 @@ binary_sensor:
     y_max: 240
     on_press:
       then:
-        - logger.log: "Touch detected (Phase 1 fallback)"
+        - voice_assistant.start
