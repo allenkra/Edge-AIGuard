@@ -54,6 +54,7 @@ from pipecat.transports.local.audio import (
 from pipecat.utils.time import time_now_iso8601
 
 sys.path.insert(0, str(Path(__file__).parent))
+from core2_transport import Core2Transport
 from esp_client import Core2Client, Core2StatusUpdater, periodic_radar_push
 from prompts import build_system_prompt
 from radar import RadarReader
@@ -252,7 +253,7 @@ class RawWriterProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def build_pipeline(args, radar, core2_client=None):
+def build_pipeline(args, radar, core2_client=None, core2_audio_transport=None):
     """Construct pipeline based on args. Returns (pipeline, task, runner, refs)."""
     context = LLMContext(messages=[])
     pair = LLMContextAggregatorPair(context)
@@ -270,25 +271,31 @@ def build_pipeline(args, radar, core2_client=None):
     raw_writer = None
     stt = None
 
-    need_transport = (not args.text) or (not args.no_audio)
-    if need_transport:
-        vad = None
-        if not args.text:
-            vad = SileroVADAnalyzer(
-                sample_rate=SAMPLE_RATE,
-                params=VADParams(confidence=0.5, start_secs=0.2, stop_secs=0.5),
+    if core2_audio_transport is not None:
+        # Core2 mode: audio I/O goes over voice_assistant API instead of Pi ALSA.
+        # Core2 firmware does its own VAD/endpointing — we still rely on the
+        # streaming STT's endpoint detector for finalisation.
+        transport = core2_audio_transport
+    else:
+        need_transport = (not args.text) or (not args.no_audio)
+        if need_transport:
+            vad = None
+            if not args.text:
+                vad = SileroVADAnalyzer(
+                    sample_rate=SAMPLE_RATE,
+                    params=VADParams(confidence=0.5, start_secs=0.2, stop_secs=0.5),
+                )
+            transport = LocalAudioTransport(
+                LocalAudioTransportParams(
+                    audio_in_enabled=not args.text,
+                    audio_out_enabled=not args.no_audio,
+                    audio_in_sample_rate=SAMPLE_RATE,
+                    audio_out_sample_rate=TTS_SAMPLE_RATE,
+                    audio_in_channels=1,
+                    audio_out_channels=1,
+                    vad_analyzer=vad,
+                )
             )
-        transport = LocalAudioTransport(
-            LocalAudioTransportParams(
-                audio_in_enabled=not args.text,
-                audio_out_enabled=not args.no_audio,
-                audio_in_sample_rate=SAMPLE_RATE,
-                audio_out_sample_rate=TTS_SAMPLE_RATE,
-                audio_in_channels=1,
-                audio_out_channels=1,
-                vad_analyzer=vad,
-            )
-        )
 
     if args.text:
         text_input = TextInputProcessor()
@@ -409,6 +416,9 @@ def parse_args():
     p.add_argument("--core2", action="store_true",
                    help="push pipeline status + radar to Core2 display "
                         "(needs CORE2_HOST and CORE2_NOISE_PSK env vars)")
+    p.add_argument("--core2-audio", action="store_true",
+                   help="route mic + speaker through Core2 via voice_assistant "
+                        "(replaces LocalAudioTransport; needs CORE2_HOST + PSK)")
     return p.parse_args()
 
 
@@ -421,27 +431,47 @@ async def main():
 
     radar = load_radar(args)
 
+    if (args.core2 or args.core2_audio) and not CORE2_NOISE_PSK:
+        logger.error("--core2 / --core2-audio require CORE2_NOISE_PSK env var (32-byte base64)")
+        return
+
     core2_client = None
     core2_radar_task = None
     if args.core2:
-        if not CORE2_NOISE_PSK:
-            logger.error("--core2 requires CORE2_NOISE_PSK env var (32-byte base64)")
-            return
         core2_client = Core2Client(CORE2_HOST, CORE2_NOISE_PSK)
         await core2_client.start()
         core2_radar_task = asyncio.create_task(
             periodic_radar_push(core2_client, radar.get_state)
         )
 
-    pipeline, task, runner, refs = build_pipeline(args, radar, core2_client=core2_client)
+    core2_audio_transport = None
+    if args.core2_audio:
+        core2_audio_transport = Core2Transport(
+            CORE2_HOST, CORE2_NOISE_PSK,
+            sample_rate_in=SAMPLE_RATE,
+            sample_rate_out=TTS_SAMPLE_RATE,
+        )
+        await core2_audio_transport.start()
 
+    pipeline, task, runner, refs = build_pipeline(
+        args, radar,
+        core2_client=core2_client,
+        core2_audio_transport=core2_audio_transport,
+    )
+
+    if args.core2_audio:
+        audio_label = f"core2@{CORE2_HOST}"
+    elif args.no_audio:
+        audio_label = "off"
+    else:
+        audio_label = "local"
     print(
         f"Edge-AIGuard pipecat pipeline starting "
         f"(LLM={LLM_MODEL}, "
         f"radar={'fake' if args.no_radar else RADAR_IP}, "
         f"mode={'text' if args.text else 'mic'}, "
-        f"audio={'off' if args.no_audio else 'on'}, "
-        f"core2={'on@' + CORE2_HOST if args.core2 else 'off'})"
+        f"audio={audio_label}, "
+        f"status={'core2@' + CORE2_HOST if args.core2 else 'off'})"
     )
 
     try:
@@ -458,6 +488,8 @@ async def main():
                 pass
         if core2_client:
             await core2_client.close()
+        if core2_audio_transport:
+            await core2_audio_transport.close()
         if hasattr(radar, "stop") and getattr(radar, "running", False):
             radar.stop()
 

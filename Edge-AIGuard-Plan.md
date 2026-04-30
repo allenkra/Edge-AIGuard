@@ -1289,10 +1289,10 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 - [x] 1.5 `esp_client.py` 状态推送工作: `Core2Client` async + `Core2StatusUpdater` FrameProcessor 集成进 `pipeline_pipecat.py` (`--core2` flag), 端到端 "Hello" → LLM → TTS 全链路状态切换正常
 
 **Phase 2 (Path B 默认; 时间紧降级 Path A)**
-- [ ] 2.1 yaml 加 voice_assistant + 触摸触发, OTA 通过
-- [ ] 2.2 `Core2Transport` 实现
-- [ ] 2.3 `--core2` 集成进 `pipeline_pipecat.py`
-- [ ] 2.4 端到端语音 demo (tap → 说话 → 回应)
+- [x] 2.1 yaml 加 voice_assistant + 触摸触发 + i2s_audio (PDM mic + NS4168 speaker), OTA 通过
+- [x] 2.2 `core2_transport.py`: `Core2Transport` (BaseTransport-style) + Core2InputTransport/Core2OutputTransport, 走 `subscribe_voice_assistant` API audio 路径; TTS 流式 `send_voice_assistant_audio` + 事件序列驱动 Core2 UI
+- [x] 2.3 `--core2-audio` 集成进 `pipeline_pipecat.py` (build_pipeline 选 Core2Transport 替代 LocalAudioTransport)
+- [ ] 2.4 端到端语音 demo (tap → 说话 → 回应) — 待物理验证
 
 ---
 
@@ -2436,5 +2436,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 2 Phase 1 ✅ 完成: 烧录通过, Core2 显示 + 状态推送全链路工作)
-**版本**: v1.8
+**最后更新**: 2026-04-29 (Day 2 Phase 2.1-2.3 完成: voice_assistant 烧录 + Core2Transport 集成, 待物理 demo)
+**版本**: v1.9

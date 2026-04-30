@@ -140,8 +140,55 @@ touchscreen:
     interrupt_pin: GPIO39
     id: m5_touch
 
-# Touch zone covering the whole screen counts as "Button A" for Phase 1.
-# Phase 2 will refine into 3 sub-zones at the bottom (A/B/C buttons).
+# Phase 2: I2S audio peripherals
+# Core2 PDM mic (SPM1423) and NS4168 speaker share the same I2S clock line
+# (GPIO0). Single i2s_audio block, ESPHome handles direction multiplexing.
+i2s_audio:
+  i2s_lrclk_pin: GPIO0
+  i2s_bclk_pin: GPIO12
+
+microphone:
+  - platform: i2s_audio
+    id: m5_mic
+    i2s_din_pin: GPIO34
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+    bits_per_sample: 16bit
+
+speaker:
+  - platform: i2s_audio
+    id: m5_speaker
+    dac_type: external   # NS4168 amp on Core2
+    i2s_dout_pin: GPIO2
+    sample_rate: 22050
+    bits_per_sample: 16bit
+
+# voice_assistant: streams audio in/out via the API (over UDP) to whichever
+# native API client subscribed via subscribe_voice_assistant() — that's our
+# Core2Transport on the Pi side.
+voice_assistant:
+  microphone: m5_mic
+  speaker: m5_speaker
+  noise_suppression_level: 2
+  use_wake_word: false   # Phase 3 / Future Work
+  auto_gain: 31dBFS
+  on_listening:
+    - lambda: |-
+        id(status_text) = "Listening...";
+  on_tts_start:
+    - lambda: |-
+        id(status_text) = "Speaking...";
+  on_end:
+    - lambda: |-
+        id(status_text) = "Ready";
+  on_error:
+    - lambda: |-
+        id(status_text) = "Error";
+        ESP_LOGE("va", "%s: %s", code.c_str(), message.c_str());
+
+# Touch anywhere on screen = tap-to-talk: starts a voice_assistant session.
+# Endpoint detection (silence) ends the session automatically.
 binary_sensor:
   - platform: touchscreen
     name: "Touch Trigger"
@@ -152,4 +199,4 @@ binary_sensor:
     y_max: 240
     on_press:
       then:
-        - logger.log: "Touch detected (Phase 1: noop)"
+        - voice_assistant.start
