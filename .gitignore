@@ -17,3 +17,7 @@ models/
 # secrets
 secrets.yaml
 .env
+
+# ESPHome build cache and downloaded toolchain
+.esphome/
+esphome/.esphome/
