@@ -1292,7 +1292,22 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 - [x] 2.1 yaml 加 voice_assistant + 触摸触发 + i2s_audio (PDM mic + NS4168 speaker), OTA 通过
 - [x] 2.2 `core2_transport.py`: `Core2Transport` (BaseTransport-style) + Core2InputTransport/Core2OutputTransport, 走 `subscribe_voice_assistant` API audio 路径; TTS 流式 `send_voice_assistant_audio` + 事件序列驱动 Core2 UI
 - [x] 2.3 `--core2-audio` 集成进 `pipeline_pipecat.py` (build_pipeline 选 Core2Transport 替代 LocalAudioTransport)
-- [ ] 2.4 端到端语音 demo (tap → 说话 → 回应) — 待物理验证
+- [◐] 2.4 端到端语音 demo: **阻塞** — 见 Phase 2.4 复盘。已恢复显示 + status push, audio 待重新接入
+
+**Phase 2.4 复盘 (2026-04-29 晚, v1.10)**
+
+OTA 烧 voice_assistant 版本后 Core2 LCD 黑屏 + 一度 boot loop. 排查发现两个问题:
+
+1. **硬件版本错配**: 项目 plan 假设 Core2 V1.0 (AXP192 PMIC), 实际是 V1.1 (AXP2101). 错误的 PMIC component 写到 AXP2101 的寄存器全是乱码 → 背光/touch IC LDO 全关 → 黑屏 + I2C scan 看不到 0x38 (touch). 多次 OTA 后 AXP2101 进入"卡死"状态, 拔电池重插也救不回来.
+2. **AXP2101 ESPHome 兼容性断层**: ESPHome 2026.4.x 的新 Arduino framework 把 `Wire.h` 移走了, 社区两个 AXP2101 fork (`stefanthoss`, `lboue`) 都依赖 Wire/XPowersLib, build 失败.
+
+**走 Path B 修复**:
+- 装 ESPHome 2025.6.0 到独立 venv `~/esphome-old/` (跟主 ESPHome 2026.4.3 共存)
+- yaml 改: `martydingo/esphome-axp192` → `lboue/esphome-axp2101`, `mipi_spi M5CORE2` → `ili9xxx M5STACK` (旧版没 mipi_spi M5CORE2 model)
+- USB flash 后 boot 日志: `axp2101.sensor: getID:0x4a` (确认是 AXP2101) + `ALDO2: + Voltage:3300 mV` (LCD backlight 已开)
+- 屏幕亮 ✅, status push 4 个状态切换可见 ✅
+- 待修: ALDO3 默认 disabled → touch IC 无电 (需要在 lboue component 找开 ALDO3 的 option)
+- 待加: i2s_audio + voice_assistant 重新加上, **必须 USB flash 不用 OTA** 以便回退
 
 ---
 
@@ -2436,5 +2451,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 2 Phase 2.1-2.3 完成: voice_assistant 烧录 + Core2Transport 集成, 待物理 demo)
-**版本**: v1.9
+**最后更新**: 2026-04-29 (Phase 2.4 复盘: Core2 V1.1 AXP2101 兼容性踩坑, ESPHome 2025.6 + lboue/axp2101 baseline 恢复, 待加回 audio)
+**版本**: v1.10

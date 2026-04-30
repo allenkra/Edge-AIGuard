@@ -4,6 +4,9 @@
 esphome:
   name: edge-aiguard-core2
   friendly_name: Edge-AIGuard Core2
+  platformio_options:
+    lib_deps:
+      - lewisxhe/XPowersLib@^0.2.4
   on_boot:
     priority: 600
     then:
@@ -18,11 +21,17 @@ esp32:
 # AXP192 PMIC component (powers LCD backlight + audio rails on Core2).
 # Lives outside ESPHome core since 2024.x — community fork from devices.esphome.io.
 external_components:
-  - source: github://martydingo/esphome-axp192
-    components: [axp192]
+  # Core2 V1.1 (post-2022) has AXP2101 PMIC, NOT AXP192. Even though both
+  # respond at I2C 0x34, AXP192 register writes do nothing on AXP2101 →
+  # backlight stays off and battery reads 0V. Confirmed via I2C scan
+  # showing 0x34/0x40/0x51/0x68 (V1.1 layout) and missing 0x38 touch IC.
+  - source: github://lboue/esphome-axp2101
+    components: [axp2101]
 
 logger:
-  level: INFO
+  level: DEBUG
+  # explicit baud — allows us to read serial via cat /dev/ttyACM0
+  baud_rate: 115200
 
 api:
   encryption:
@@ -61,17 +70,22 @@ i2c:
     scan: true
     frequency: 400kHz
 
-# AXP192 power management as sensor platform (per official M5Core2 docs).
-# Initialising it auto-enables LDO2 (LCD backlight) + DC-DC3 (LCD logic).
+# AXP2101 power management (per official M5Core2 V1.1 docs).
+# Initialising it enables the LDOs feeding LCD backlight + touch IC.
 sensor:
-  - platform: axp192
+  - platform: axp2101
     model: M5CORE2
     address: 0x34
     i2c_id: bus_a
-    id: axp192_id
+    id: axp_id
     update_interval: 30s
+    brightness: 75%
     battery_level:
       name: "Core2 Battery Level"
+    battery_voltage:
+      name: "Core2 Battery Voltage"
+    battery_charging:
+      name: "Core2 Battery Charging"
 
 # SPI for ILI9342C display
 spi:
@@ -80,10 +94,13 @@ spi:
     mosi_pin: GPIO23
 
 display:
-  - platform: mipi_spi
-    model: M5CORE2
+  - platform: ili9xxx
+    model: M5STACK
     spi_id: spi_lcd
+    cs_pin: GPIO5
+    dc_pin: GPIO15
     update_interval: 500ms
+    invert_colors: true
     lambda: |-
       it.fill(Color::BLACK);
       // Title bar
@@ -140,55 +157,11 @@ touchscreen:
     interrupt_pin: GPIO39
     id: m5_touch
 
-# Phase 2: I2S audio peripherals
-# Core2 PDM mic (SPM1423) and NS4168 speaker share the same I2S clock line
-# (GPIO0). Single i2s_audio block, ESPHome handles direction multiplexing.
-i2s_audio:
-  i2s_lrclk_pin: GPIO0
-  i2s_bclk_pin: GPIO12
+# PHASE 2 ROLLED BACK — i2s_audio + voice_assistant suspected of bricking
+# the LCD path. Re-enable incrementally after we confirm Phase 1 still works.
+# Backup of the audio-enabled version: core2_v2_audio.yaml.
 
-microphone:
-  - platform: i2s_audio
-    id: m5_mic
-    i2s_din_pin: GPIO34
-    adc_type: external
-    pdm: true
-    sample_rate: 16000
-    bits_per_sample: 16bit
-
-speaker:
-  - platform: i2s_audio
-    id: m5_speaker
-    dac_type: external   # NS4168 amp on Core2
-    i2s_dout_pin: GPIO2
-    sample_rate: 22050
-    bits_per_sample: 16bit
-
-# voice_assistant: streams audio in/out via the API (over UDP) to whichever
-# native API client subscribed via subscribe_voice_assistant() — that's our
-# Core2Transport on the Pi side.
-voice_assistant:
-  microphone: m5_mic
-  speaker: m5_speaker
-  noise_suppression_level: 2
-  use_wake_word: false   # Phase 3 / Future Work
-  auto_gain: 31dBFS
-  on_listening:
-    - lambda: |-
-        id(status_text) = "Listening...";
-  on_tts_start:
-    - lambda: |-
-        id(status_text) = "Speaking...";
-  on_end:
-    - lambda: |-
-        id(status_text) = "Ready";
-  on_error:
-    - lambda: |-
-        id(status_text) = "Error";
-        ESP_LOGE("va", "%s: %s", code.c_str(), message.c_str());
-
-# Touch anywhere on screen = tap-to-talk: starts a voice_assistant session.
-# Endpoint detection (silence) ends the session automatically.
+# Phase 1 fallback: touch logs only, no voice_assistant binding.
 binary_sensor:
   - platform: touchscreen
     name: "Touch Trigger"
@@ -199,4 +172,4 @@ binary_sensor:
     y_max: 240
     on_press:
       then:
-        - voice_assistant.start
+        - logger.log: "Touch detected (Phase 1 fallback)"
