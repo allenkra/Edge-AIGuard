@@ -1292,7 +1292,43 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 - [x] 2.1 yaml 加 voice_assistant + 触摸触发 + i2s_audio (PDM mic + NS4168 speaker), OTA 通过
 - [x] 2.2 `core2_transport.py`: `Core2Transport` (BaseTransport-style) + Core2InputTransport/Core2OutputTransport, 走 `subscribe_voice_assistant` API audio 路径; TTS 流式 `send_voice_assistant_audio` + 事件序列驱动 Core2 UI
 - [x] 2.3 `--core2-audio` 集成进 `pipeline_pipecat.py` (build_pipeline 选 Core2Transport 替代 LocalAudioTransport)
-- [◐] 2.4 端到端语音 demo: **阻塞** — 见 Phase 2.4 复盘。已恢复显示 + status push, audio 待重新接入
+- [◐] 2.4 端到端语音 demo: **mic 完全工作, speaker 受 I2S 共享冲突阻塞**
+
+**Phase 2.4 最终状态 (v1.11, 2026-04-29 23:30)**
+
+| 链路 | 状态 |
+|------|------|
+| Pi → Core2 status push (Listening/Thinking/Speaking/Ready + HR/BR) | ✅ |
+| Core2 触摸触发 | ❌ FT6336 IC 无电响应 → 用 Pi-side `start_listening` ESPHome service 绕过 |
+| Core2 mic 录音 → Pi voice_assistant API 接收 | ✅ |
+| Pi sherpa STT 转 text | ✅ ("HALLO", "WHAT IS THE CAPITAL OF FRANCE" 等被识别) |
+| Radar 注入 LLM system prompt | ✅ ("calm and relaxed" 等状态进 prompt) |
+| LLM 生成 + Piper TTS 出音频 | ✅ |
+| Pi → Core2 TTS audio (chunked 4KB @ 70ms) | ✅ Pi 侧完整发送 + log 验证 |
+| Core2 speaker 播放 | ❌ **silent** — `i2s_audio.speaker: Stopped` 立刻退出, 后续 audio 全 reject |
+
+**Core2 speaker 阻塞根因**: ESPHome voice_assistant 假设硬件有独立 mic/speaker peripheral, 但 Core2 V1.1 PDM mic + NS4168 speaker 共享 I2S0 (LRCK GPIO0). voice_assistant 状态机不会在 TTS_STREAM_START 时主动 stop mic — mic 仍占 I2S0 → speaker `start_i2s_driver_` 失败 → speaker_task 立刻 delete_task_ 退出 → device 进 IDLE → 后续 chunks 全部 "Cannot receive audio, buffer is full" 丢弃.
+
+**Pi 侧已修复的全部点** (commits c8fdfab → ac31bb0):
+1. AXP192 → AXP2101 (Core2 V1.1 PMIC); ESPHome 2025.6 + lboue/esphome-axp2101 + ili9xxx
+2. ALDO3 enable lambda (lboue 默认 disable, NS4168 amp 没电)
+3. `handle_start` return 0 (None 触发 "Server could not be started")
+4. `InputAudioRawFrame` (不是 mixin AudioRawFrame; mic chunks 无法到 STT)
+5. TTS_START 必须带 `text` 字段 (不是 tts_text), 否则 firmware early-return 不启动 speaker
+6. TTS audio chunked 4KB @ 70ms (一次性 122KB 超出 16KB SPEAKER_BUFFER_SIZE)
+7. TTSStoppedFrame 等所有 chunks 发完才发 RUN_END
+8. Speaker timeout 500ms → 30s
+9. Pi-side `start_listening` ESPHome service 替代死掉的触摸 IC
+10. Idle timeout 5min → 30min (调试期不被 cancel)
+
+**Future Work (Phase 2.5 / Day 4+)** 修 Core2 speaker:
+- A. yaml 拆 i2s_audio 成两个 block (i2s_mic, i2s_spk), 让 ESPHome 自动分配 I2S0/I2S1
+- B. 加 mic.stop() before TTS_STREAM_START, mic.start() after RUN_END (改 voice_assistant 状态机或在外层管)
+- C. 改用支持双向独立 audio 的 ESP32-S3 board (Core2 是 ESP32, 只有 2 个 I2S)
+
+### Demo 与论文 fallback
+- Demo 视频用 Core2 mic + Pi 本地输出 (USB DAC/HDMI), Core2 屏幕展示 status + radar 数据
+- 论文里把 Core2 speaker 做完整的 limitation discussion: "Hardware constraint of shared I2S0 on M5Stack Core2 V1.1; future work would deploy on ESP32-S3 with dual I2S, or restructure ESPHome voice_assistant state machine to coordinate exclusive peripheral access."
 
 **Phase 2.4 复盘 (2026-04-29 晚, v1.10)**
 
@@ -2451,5 +2487,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Phase 2.4 复盘: Core2 V1.1 AXP2101 兼容性踩坑, ESPHome 2025.6 + lboue/axp2101 baseline 恢复, 待加回 audio)
-**版本**: v1.10
+**最后更新**: 2026-04-29 (Phase 2.4 收尾: mic + display + status push 全工作, speaker 因 I2S0 共享冲突 park 为 Future Work)
+**版本**: v1.11
