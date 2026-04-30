@@ -2436,5 +2436,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Day 1.5 完成: pipecat 端到端 pipeline v1 跑通, layer 1+2 smoke 全 PASS)
-**版本**: v1.6
+**最后更新**: 2026-04-29 (Day 2 Phase 1.1+1.2 完成, ESPHome 装好 + core2.yaml validate 通过)
+**版本**: v1.7
