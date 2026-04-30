@@ -84,7 +84,11 @@ class Core2OutputTransport(FrameProcessor):
             # voice_assistant protocol expects INTENT_END before TTS_START so
             # the device's pipeline state machine moves out of "intent" phase.
             self._transport._send_event(VA.VOICE_ASSISTANT_INTENT_END)
-            self._transport._send_event(VA.VOICE_ASSISTANT_TTS_START)
+            # ESPHome voice_assistant.cpp checks for arg.name == "text" and
+            # early-returns + skips speaker->start() if it's empty. Field is
+            # literally "text", NOT "tts_text". With empty/missing text the
+            # device never enters playback state — silent speaker.
+            self._transport._send_event(VA.VOICE_ASSISTANT_TTS_START, {"text": "..."})
             self._transport._send_event(VA.VOICE_ASSISTANT_TTS_STREAM_START)
             self._tts_streaming = True
         elif isinstance(frame, TTSAudioRawFrame):
