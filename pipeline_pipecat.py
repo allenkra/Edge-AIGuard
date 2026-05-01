@@ -11,8 +11,9 @@ Modes:
   --no-radar    radar.fake_mode='normal' instead of real ESPHome
   --wav PATH    one-shot: feed PATH through STT, exit (smoke test)
 
-Speculative LLM prefill is intentionally not in this version — see
-test_kv_cache.py for the validation that gates that follow-up work.
+Speculative LLM prefill enabled by default — sherpa-onnx partials drive
+async /api/generate warmups (see speculation.py). Disable with
+--no-speculation for A/B comparison.
 """
 import argparse
 import asyncio
@@ -58,6 +59,7 @@ from core2_transport import Core2Transport
 from esp_client import Core2Client, Core2StatusUpdater, periodic_radar_push
 from prompts import build_system_prompt
 from radar import RadarReader
+from speculation import SpeculativePrefillProcessor
 
 MODEL_DIR = Path(__file__).parent / "models" / "streaming-zipformer-en"
 ENCODER = MODEL_DIR / "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
@@ -297,12 +299,20 @@ def build_pipeline(args, radar, core2_client=None, core2_audio_transport=None):
                 )
             )
 
+    spec = None
     if args.text:
         text_input = TextInputProcessor()
         head = [text_input]
     else:
         stt = SherpaOnnxSTTService(model_dir=MODEL_DIR, sample_rate=SAMPLE_RATE)
         head = [transport.input(), stt]
+        if not args.no_speculation:
+            spec = SpeculativePrefillProcessor(
+                get_state=radar.get_state,
+                build_system_prompt=build_system_prompt,
+                model=LLM_MODEL,
+            )
+            head.append(spec)
 
     # Radar updater BEFORE user_agg so the system message is fresh by the time
     # user_agg appends user message and emits LLMContextFrame to the LLM.
@@ -329,6 +339,7 @@ def build_pipeline(args, radar, core2_client=None, core2_audio_transport=None):
         "text_input": text_input,
         "transport": transport,
         "stt": stt,
+        "spec": spec,
         "llm": llm,
         "tts": tts,
         "raw_writer": raw_writer,
@@ -419,6 +430,8 @@ def parse_args():
     p.add_argument("--core2-audio", action="store_true",
                    help="route mic + speaker through Core2 via voice_assistant "
                         "(replaces LocalAudioTransport; needs CORE2_HOST + PSK)")
+    p.add_argument("--no-speculation", action="store_true",
+                   help="disable speculative LLM prefill (for A/B comparison)")
     return p.parse_args()
 
 
@@ -471,7 +484,8 @@ async def main():
         f"radar={'fake' if args.no_radar else RADAR_IP}, "
         f"mode={'text' if args.text else 'mic'}, "
         f"audio={audio_label}, "
-        f"status={'core2@' + CORE2_HOST if args.core2 else 'off'})"
+        f"status={'core2@' + CORE2_HOST if args.core2 else 'off'}, "
+        f"speculation={'off' if args.no_speculation or args.text else 'on'})"
     )
 
     try:

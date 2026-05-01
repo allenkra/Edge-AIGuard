@@ -259,10 +259,40 @@ python pipeline_pipecat.py --wav models/streaming-zipformer-en/test_0.wav
 **Layer 3 (mic 端到端 + barge-in)**: 等 USB 麦克风到货后跑。
 
 **未做 (留给后续)**:
-- speculative LLM prefill (KV-cache 已验证可行,~89.9% 节省)
+- ~~speculative LLM prefill~~ ✅ **已完成 v1, 见下**
 - tools.py function calling 集成 (TODO 标记在 LLM 构造处)
 - HR/BR 离散化为 zone (~85%+ 命中潜力)
 - 旧 [pipeline.py](pipeline.py) 重排 (用户明确保留)
+
+**Step 4 完成: Speculative LLM prefill v1** (2026-04-30, 见 `speculation.py` + `test_spec_unit.py`):
+
+机制: 用户讲话时 sherpa-onnx 吐 InterimTranscriptionFrame, 异步 POST `/api/generate` (`num_predict=1`, `keep_alive=30m`) 让 Ollama 提前加载 KV cache。等用户讲完, pipecat OLLamaLLMService 走 `/v1/chat` 命中预热 cache。
+
+**前提验证** (见 `test_chat_template_alignment.py`):
+- Test 1: `/api/generate` 跟 `/v1/chat` 渲染字节级一致 (prompt_eval_count = 58 双方相同)
+- Test 2: 跨 endpoint 缓存命中实测 5.25× 加速, 80.9% wallclock 省
+
+**实现**:
+- [speculation.py](speculation.py): `SpeculativePrefillProcessor(FrameProcessor)`, ~140 行
+- 集成进 [pipeline_pipecat.py](pipeline_pipecat.py): mic 模式 head 末尾插入, `--no-speculation` 关闭做 A/B
+- text 模式自动跳过 (无 InterimTranscriptionFrame)
+
+**设计决策** (用户确认):
+- 触发: 每个 partial 都打 spec, 无 debounce 无 growth gate
+- in-flight: cancel-on-new (asyncio cancel 不真切断 HTTP, Ollama 仍跑完加载 cache)
+- 多 turn: v1 简化 (system + 当前 partial), 第 1 turn 100%命中, 后续仅命中 system 前缀
+- Radar 抖动: 不 snapshot, 接受 67% 基线
+
+**单元测试结果** (`test_spec_unit.py`):
+| 场景 | wallclock | 备注 |
+|---|---:|---|
+| Cold `/v1/chat` (无 spec) | **10147 ms** | 152 token system+prompt |
+| Spec sequence (3 partials) → warm `/v1/chat` | **1570 ms** | **省 84.5%** |
+| Spec stats | `{fired:3, completed:1, cancelled:2}` | cancel-on-new 行为符合预期 |
+
+注意: `cancelled:2` + `completed:1` 表明 2 个 spec 在 asyncio 层被新 partial 取消, 但底层 HTTP/Ollama 仍跑完 (这是 `asyncio.to_thread` 的固有特性, 而且对我们有利——老 spec 加载的部分 cache 给后续 spec 当 prefix 用, 不浪费)。
+
+**Layer 3 实测预期**: mic 模式下用户讲完到首 token 应从 v1 的 ~6s 降到 ~1-2s。等 USB 麦克风到货验证。
 
 **累计资源占用估算 (满负载, 4 核 Pi 5)**:
 
@@ -2487,5 +2517,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-29 (Phase 2.4 收尾: mic + display + status push 全工作, speaker 因 I2S0 共享冲突 park 为 Future Work)
-**版本**: v1.11
+**最后更新**: 2026-04-30 (speculative LLM prefill v1 落地, 单元测试 PASS 省 84.5%)
+**版本**: v1.12
