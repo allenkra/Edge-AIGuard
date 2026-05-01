@@ -60,6 +60,7 @@ from esp_client import Core2Client, Core2StatusUpdater, periodic_radar_push
 from prompts import build_system_prompt
 from radar import RadarReader
 from speculation import SpeculativePrefillProcessor
+from tts_aggregator import PhraseAwareTextAggregator
 
 MODEL_DIR = Path(__file__).parent / "models" / "streaming-zipformer-en"
 ENCODER = MODEL_DIR / "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
@@ -267,6 +268,11 @@ def build_pipeline(args, radar, core2_client=None, core2_audio_transport=None):
     )
     llm = OLLamaLLMService(model=LLM_MODEL)
     tts = PiperTTSService(voice_id=PIPER_VOICE, download_dir=PIPER_DIR)
+    # Replace default sentence-only aggregator with phrase-aware one so
+    # commas/colons also trigger TTS — cuts TTFA on multi-clause replies.
+    tts._text_aggregator = PhraseAwareTextAggregator(
+        aggregation_type=tts._text_aggregator._aggregation_type
+    )
 
     transport = None
     text_input = None
