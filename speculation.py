@@ -46,6 +46,14 @@ OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 # letting a stuck request linger forever.
 SPEC_TIMEOUT_S = 15.0
 
+# Debounce / growth gate. Skip a partial if BOTH:
+#   - it grew by less than MIN_GROWTH_CHARS chars beyond the last fired spec
+#   - less than DEBOUNCE_S has passed since the last fired spec
+# Either condition alone fires (fast typing or large jumps still trigger).
+# First partial of an utterance always fires (last_spec_time=0 → elapsed huge).
+MIN_GROWTH_CHARS = 6
+DEBOUNCE_S = 0.2
+
 
 class SpeculativePrefillProcessor(FrameProcessor):
     """Watches InterimTranscriptionFrame, fires async warmup to Ollama.
@@ -62,18 +70,24 @@ class SpeculativePrefillProcessor(FrameProcessor):
         build_system_prompt,
         model: str,
         keep_alive: str = "30m",
+        min_growth_chars: int = MIN_GROWTH_CHARS,
+        debounce_s: float = DEBOUNCE_S,
     ):
         super().__init__()
         self._get_state = get_state
         self._build_system_prompt = build_system_prompt
         self._model = model
         self._keep_alive = keep_alive
+        self._min_growth = min_growth_chars
+        self._debounce_s = debounce_s
 
         self._in_flight: asyncio.Task | None = None
         self._spec_count = 0
         self._spec_complete = 0
         self._spec_cancelled = 0
+        self._spec_skipped = 0
         self._last_spec_text = ""
+        self._last_spec_time = 0.0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -85,10 +99,24 @@ class SpeculativePrefillProcessor(FrameProcessor):
             # (its cache load is what the real call will benefit from). Just
             # reset tracking so the next utterance starts fresh.
             self._last_spec_text = ""
+            self._last_spec_time = 0.0
 
         await self.push_frame(frame, direction)
 
     def _fire_async(self, partial: str):
+        # Debounce + growth gate. Skip if partial is just a small extension
+        # arriving too soon after the last spec — the previous spec's prefix
+        # is still a valid prefix of this one, so skipping doesn't hurt
+        # cache hit (final partial is always a superset). First partial of
+        # an utterance fires unconditionally because _last_spec_time=0 makes
+        # elapsed huge.
+        now = time.monotonic()
+        growth = len(partial) - len(self._last_spec_text)
+        elapsed = now - self._last_spec_time
+        if growth < self._min_growth and elapsed < self._debounce_s:
+            self._spec_skipped += 1
+            return
+
         # Cancel any prior in-flight spec on the asyncio side. The underlying
         # HTTP request keeps running in the thread pool, but that's fine —
         # Ollama still loads the cache for the prior partial, and subsequent
@@ -107,6 +135,7 @@ class SpeculativePrefillProcessor(FrameProcessor):
         self._spec_count += 1
         seq = self._spec_count
         self._last_spec_text = partial
+        self._last_spec_time = now
         self._in_flight = asyncio.create_task(self._fire(system, partial, seq))
 
     async def _fire(self, system: str, prompt: str, seq: int):
@@ -148,4 +177,5 @@ class SpeculativePrefillProcessor(FrameProcessor):
             "fired": self._spec_count,
             "completed": self._spec_complete,
             "cancelled": self._spec_cancelled,
+            "skipped": self._spec_skipped,
         }

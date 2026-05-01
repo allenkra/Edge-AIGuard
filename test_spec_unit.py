@@ -138,6 +138,31 @@ async def main():
     else:
         print(f"⚠️  warning: speedup below 50%. Check stats and Ollama logs.")
 
+    # --- Debounce gate test ---
+    print("\n=== Debounce gate test ===")
+    proc2 = SpeculativePrefillProcessor(
+        get_state=fake_get_state,
+        build_system_prompt=fake_build_system_prompt,
+        model="qwen2.5:1.5b",
+    )
+    # Rapid-fire small extensions: only the first should fire.
+    proc2._fire_async("what is")          # first → fires (elapsed huge)
+    proc2._fire_async("what is t")        # growth 2, elapsed ~0ms → skip
+    proc2._fire_async("what is th")       # growth 3 vs last_fired, elapsed ~0ms → skip
+    proc2._fire_async("what is tha")      # growth 4 vs last_fired, elapsed ~0ms → skip
+    print(f"  rapid-fire stats: {proc2.stats}")
+    if proc2.stats["fired"] == 1 and proc2.stats["skipped"] == 3:
+        print("  ✅ debounce gate working: 1 fired, 3 skipped")
+    else:
+        print(f"  ⚠️  unexpected stats: expected fired=1 skipped=3")
+    # Cancel the in-flight task so it doesn't linger
+    if proc2._in_flight and not proc2._in_flight.done():
+        proc2._in_flight.cancel()
+        try:
+            await proc2._in_flight
+        except asyncio.CancelledError:
+            pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
