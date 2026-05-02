@@ -112,7 +112,18 @@ class SherpaOnnxSTTService(STTService):
         sample_rate: int = SAMPLE_RATE,
         **kwargs,
     ):
-        super().__init__(sample_rate=sample_rate, audio_passthrough=True, **kwargs)
+        # pipecat's STTService requires every Settings field to be explicitly
+        # set or it logs a noisy "NOT_GIVEN" validate_complete error. The
+        # sherpa-onnx model is identified by on-disk files rather than a
+        # vendor model name; we pass static placeholders so the validation
+        # passes without affecting behavior.
+        super().__init__(
+            sample_rate=sample_rate,
+            audio_passthrough=True,
+            model="sherpa-onnx-streaming-zipformer-en",
+            language=Language.EN,
+            **kwargs,
+        )
         self._model_dir = model_dir
         self._num_threads = num_threads
         self._recognizer = None
