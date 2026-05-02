@@ -154,6 +154,10 @@ class Core2Transport:
         self._closed = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._start_listen_svc = None
+        # Set whenever Core2 fires handle_start (= it accepted a request_start
+        # and entered STREAMING_MICROPHONE). Lets rearm_listen poll-and-wait
+        # instead of a blind fixed-duration sleep.
+        self._va_started_event = asyncio.Event()
 
     def input(self) -> Core2InputTransport:
         return self._input
@@ -253,6 +257,11 @@ class Core2Transport:
             f"[core2.audio] VA start (conv={conversation_id}, "
             f"flags={flags}, wake={wake_word_phrase})"
         )
+        # Signal the rearm poll loop that Core2 actually accepted a
+        # request_start (i.e. it transitioned out of RESPONSE_FINISHED into
+        # IDLE then into STREAMING_PIPELINE). Lets rearm_listen exit early
+        # instead of timing out.
+        self._va_started_event.set()
         # Acknowledge by sending Run Start + STT Start so Core2's on_listening
         # lambda fires and the user sees the state change immediately.
         self._send_event(VA.VOICE_ASSISTANT_RUN_START)
@@ -286,26 +295,56 @@ class Core2Transport:
                 f.write(audio_bytes)
         await self._input.push_audio(audio_bytes)
 
-    async def rearm_listen(self, delay_s: float = 12.0):
-        """Trigger Core2 voice_assistant.start so the next user turn captures
-        without waiting for a touch. Voice_assistant.cpp's request_start only
-        works in State::IDLE — anything else is a silent no-op. After RUN_END
-        the device walks RESPONSE_FINISHED → drain speaker_buffer_ → wait for
-        speaker to flush DMA → speaker_->stop() → IDLE. That sequence takes
-        roughly (audio_duration + 5s) — for a typical 6s TTS response, ~11s.
-        Default 12s is a conservative wait; if you really need faster turn,
-        poll Core2's voice_assistant state via the API (TODO).
+    async def rearm_listen(self, initial_delay_s: float = 0.5,
+                            poll_interval_s: float = 1.0,
+                            max_wait_s: float = 30.0):
+        """Trigger Core2 voice_assistant.start as soon as Core2 is ready.
+
+        voice_assistant.cpp's request_start only works in State::IDLE — any
+        other state is a silent no-op. After RUN_END the device walks
+        RESPONSE_FINISHED → drain speaker_buffer_ → wait for I2S DMA flush →
+        speaker_->stop() → IDLE. That takes roughly audio_duration + 3s.
+
+        Strategy: send start_listening every poll_interval_s. _on_va_start
+        sets _va_started_event when Core2 actually accepts a session; that's
+        our success signal. Loop until accepted or max_wait_s elapses.
+
+        Empirically the first 1-2 attempts fail (state still RESPONSE_FINISHED)
+        and the third or fourth succeeds (~3s after RUN_END for short replies),
+        well below the previous 12s fixed-wait worst case.
         """
         if self._closed or self._client is None or self._start_listen_svc is None:
             return
-        try:
-            await asyncio.sleep(delay_s)
-            if self._closed or self._client is None:
+        # Brief initial delay so we don't ping the device while it's still
+        # processing our own RUN_END event.
+        await asyncio.sleep(initial_delay_s)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait_s
+        attempt = 0
+        while not self._closed and loop.time() < deadline:
+            attempt += 1
+            self._va_started_event.clear()
+            try:
+                await self._client.execute_service(self._start_listen_svc, {})
+            except Exception as e:
+                logger.warning(f"[core2.audio] rearm send failed: {e!r}")
                 return
-            await self._client.execute_service(self._start_listen_svc, {})
-            logger.info("[core2.audio] auto-rearm: start_listening sent")
-        except Exception as e:
-            logger.warning(f"[core2.audio] rearm failed: {e!r}")
+            try:
+                await asyncio.wait_for(
+                    self._va_started_event.wait(),
+                    timeout=poll_interval_s,
+                )
+                logger.info(
+                    f"[core2.audio] auto-rearm: VA accepted on attempt #{attempt} "
+                    f"(~{(attempt - 1) * poll_interval_s + initial_delay_s:.1f}s after RUN_END)"
+                )
+                return
+            except asyncio.TimeoutError:
+                continue  # device not IDLE yet, retry
+        logger.warning(
+            f"[core2.audio] auto-rearm gave up after {attempt} attempts "
+            f"({max_wait_s}s) — Core2 likely stuck in non-IDLE state"
+        )
 
     async def close(self):
         self._closed = True
