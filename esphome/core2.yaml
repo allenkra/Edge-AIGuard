@@ -221,7 +221,11 @@ speaker:
 voice_assistant:
   microphone: m5_mic
   speaker: m5_speaker
-  noise_suppression_level: 2
+  # 4 = max WebRTC NS aggressiveness. Trade-off: stronger far-field denoise +
+  # better STT accuracy in noisy rooms, at risk of clipping weak fricatives
+  # (s, f, th) on close-talk. Empirically a net win on Core2 PDM mic with
+  # typical 1-2m speaking distance + ambient HVAC/laptop fan noise.
+  noise_suppression_level: 4
   use_wake_word: false
   on_listening:
     - lambda: |-
