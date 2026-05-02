@@ -183,7 +183,7 @@
 | 7' 动态 HR 注入 (改后) | **1925** | HR 挪到末尾, 省 67% (净改善 1.2s) |
 
 → **结论: GO**。speculative prefill 物理可行,理论上 TTFT 8s → ~1.5s。已完成:
-- ✅ [prompts.py](prompts.py) 重构: 动态 readings 挪到 system prompt 末尾 → 跨 turn 缓存命中从 45% 提升到 67%
+- ✅ [prompts.py](../prompts.py) 重构: 动态 readings 挪到 system prompt 末尾 → 跨 turn 缓存命中从 45% 提升到 67%
 
 下一步: (a) 评估 HR/BR 离散化为 zone (可冲到 ~90% 命中, 但需评估对"精确报数"能力的影响);(b) 引入真流式 ASR (sherpa-onnx) + pipecat 做 speculation 编排。
 
@@ -223,7 +223,7 @@ API 注意: `SileroVADAnalyzer` 构造器只存 `_init_sample_rate`,framework �
 
 **Step 3 完成: pipecat 端到端全双工 pipeline v1** (2026-04-29, 见 `pipeline_pipecat.py`):
 
-新文件 `pipeline_pipecat.py` (~360 行) 在不动 [pipeline.py](pipeline.py) 的前提下,用 pipecat 1.1.0 串起完整流式链路:
+新文件 `pipeline_pipecat.py` (~360 行) 在不动 [pipeline.py](../pipeline.py) 的前提下,用 pipecat 1.1.0 串起完整流式链路:
 
 ```
 text/mic -> [STT/sherpa-onnx] -> RadarSystemPromptUpdater -> LLMUserAggregator
@@ -242,7 +242,7 @@ API 注意:
 - STTService 跟 VADAnalyzer 一样,framework 用 `start(StartFrame)` 设 `_sample_rate`;standalone 模式直接赋值 `_sample_rate` 即可
 - pipecat 自定义 FrameProcessor 必须显式 `await self.push_frame(frame, direction)` 才能转发,否则 frames 会卡在该节点(StartFrame 卡死整条 pipeline)
 - LLMContext 用 `_messages` 私有属性 mutate (无 public messages property),但 list 是引用,in-place 改 OK
-- PiperTTSService `download_dir=Path("~/piper/piper")` 直接复用 [pipeline.py](pipeline.py) 已有 .onnx,零下载
+- PiperTTSService `download_dir=Path("~/piper/piper")` 直接复用 [pipeline.py](../pipeline.py) 已有 .onnx,零下载
 
 **Layer 1 smoke (text mode 端到端)**:
 ```
@@ -254,7 +254,7 @@ echo -e "hello, what's the capital of France?\nq" | python pipeline_pipecat.py -
 ```
 python pipeline_pipecat.py --wav models/streaming-zipformer-en/test_0.wav
 ```
-✅ 16+ 个 InterimTranscriptionFrame 渐进输出,sherpa endpoint 在 1.5s+ 静音后触发 TranscriptionFrame final="AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"——与 [bench_sherpa.py](bench_sherpa.py) 等价正确。
+✅ 16+ 个 InterimTranscriptionFrame 渐进输出,sherpa endpoint 在 1.5s+ 静音后触发 TranscriptionFrame final="AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"——与 [bench_sherpa.py](../benchmarks/bench_sherpa.py) 等价正确。
 
 **Layer 3 (mic 端到端 + barge-in)**: 等 USB 麦克风到货后跑。
 
@@ -262,7 +262,7 @@ python pipeline_pipecat.py --wav models/streaming-zipformer-en/test_0.wav
 - ~~speculative LLM prefill~~ ✅ **已完成 v1, 见下**
 - tools.py function calling 集成 (TODO 标记在 LLM 构造处)
 - HR/BR 离散化为 zone (~85%+ 命中潜力)
-- 旧 [pipeline.py](pipeline.py) 重排 (用户明确保留)
+- 旧 [pipeline.py](../pipeline.py) 重排 (用户明确保留)
 
 **Step 4 完成: Speculative LLM prefill v1** (2026-04-30, 见 `speculation.py` + `test_spec_unit.py`):
 
@@ -273,8 +273,8 @@ python pipeline_pipecat.py --wav models/streaming-zipformer-en/test_0.wav
 - Test 2: 跨 endpoint 缓存命中实测 5.25× 加速, 80.9% wallclock 省
 
 **实现**:
-- [speculation.py](speculation.py): `SpeculativePrefillProcessor(FrameProcessor)`, ~140 行
-- 集成进 [pipeline_pipecat.py](pipeline_pipecat.py): mic 模式 head 末尾插入, `--no-speculation` 关闭做 A/B
+- [speculation.py](../speculation.py): `SpeculativePrefillProcessor(FrameProcessor)`, ~140 行
+- 集成进 [pipeline_pipecat.py](../pipeline_pipecat.py): mic 模式 head 末尾插入, `--no-speculation` 关闭做 A/B
 - text 模式自动跳过 (无 InterimTranscriptionFrame)
 
 **设计决策** (用户确认):
@@ -1322,43 +1322,85 @@ ESPHome `micro_wake_word` (`hey_jarvis` 或 `okay_nabu` 预训模型) + `voice_a
 - [x] 2.1 yaml 加 voice_assistant + 触摸触发 + i2s_audio (PDM mic + NS4168 speaker), OTA 通过
 - [x] 2.2 `core2_transport.py`: `Core2Transport` (BaseTransport-style) + Core2InputTransport/Core2OutputTransport, 走 `subscribe_voice_assistant` API audio 路径; TTS 流式 `send_voice_assistant_audio` + 事件序列驱动 Core2 UI
 - [x] 2.3 `--core2-audio` 集成进 `pipeline_pipecat.py` (build_pipeline 选 Core2Transport 替代 LocalAudioTransport)
-- [◐] 2.4 端到端语音 demo: **mic 完全工作, speaker 受 I2S 共享冲突阻塞**
+- [x] 2.4 端到端语音 demo: **全链路工作** (touch + mic + STT + LLM + TTS + speaker), v1.13 解锁
+- [x] 2.5 连续对话: TTSStoppedFrame 后自动 rearm Core2, 用户无需触摸即可继续说
 
-**Phase 2.4 最终状态 (v1.11, 2026-04-29 23:30)**
+**Phase 2.5 (v1.13, 2026-05-01) — Touch + Speaker 完整修复 + 连续对话**
 
 | 链路 | 状态 |
 |------|------|
 | Pi → Core2 status push (Listening/Thinking/Speaking/Ready + HR/BR) | ✅ |
-| Core2 触摸触发 | ❌ FT6336 IC 无电响应 → 用 Pi-side `start_listening` ESPHome service 绕过 |
+| Core2 屏幕触摸触发 listening | ✅ 删 `interrupt_pin: GPIO39` 走 50ms polling |
+| Core2 mic 录音 → Pi voice_assistant API | ✅ |
+| Pi sherpa STT 转 text + 端点检测 | ✅ |
+| Radar 注入 LLM system prompt | ✅ |
+| LLM 生成 + Piper TTS streaming | ✅ |
+| Pi → Core2 TTS audio (1KB @ 30ms = 34 KB/s) | ✅ |
+| **Core2 speaker 真出声** (耳朵实测多轮通过) | ✅ |
+| 连续对话 (auto-rearm) | ✅ 12s 后自动转 Listening, 不用触摸 |
+
+**今日 (2026-05-01) 拆解的 5 个 root cause** (按修复顺序):
+
+1. **Touch trigger 一直死的真因**: `ft63x6.cpp:33` 给 `interrupt_pin` 设 `FLAG_PULLUP`, 但 ESP32 GPIO34-39 是 input-only, 内部 pull-up 在硅片层被忽略. FT6336 INT 是 open-drain → GPIO39 浮空 → 中断不发. 而 `touchscreen.cpp:32` 一旦 attach interrupt 就立刻 `stop_poller()`, polling 也死. **修**: yaml 删 `interrupt_pin: GPIO39` 一行 → polling 接管 (`update_interval: 50ms`).
+
+2. **Mic 一直占着 I2S0 不放**: 我们 `_on_va_stop` 只发 `STT_END` + `INTENT_START`, 这两个 event 在 `voice_assistant.cpp` 只 trigger callback **不动状态机**. 唯一会触发 `STREAMING_MICROPHONE → STOP_MICROPHONE → mic_source_->stop()` 的是 `STT_VAD_END` (line 763). 而我们 Pi 端没本地 VAD, Core2 也没装 micro_vad → 状态机永远卡住 → mic 永远占 I2S0 → `speaker_->start()` 失败. **修**: `core2_transport.py` 监听 pipecat 的 `UserStoppedSpeakingFrame` (sherpa endpoint 时 `broadcast_frame` 上下游全发), 收到就发 `STT_VAD_END`.
+
+3. **Speaker 状态机卡 AWAITING_RESPONSE**: 即使 mic 停了, 状态机也只在 `TTS_END(url=...)` 收到非空 url 后才转 `STREAMING_RESPONSE` (`voice_assistant.cpp:692-693`). 我们之前发的 TTS_END 没带 url → `voice_assistant.cpp:674` 早 return → 状态卡住 → STREAMING_RESPONSE 状态下才跑的 `write_speaker_()` 永远不调 → 16KB pre-buffer 1 秒填满 → 之后 chunks 全 reject. **修**: 在 `TTSStartedFrame` 时就发 `TTS_END({"url": "tts://local"})` 而不是等到 `TTSStoppedFrame`, 让状态机第一时间进 STREAMING_RESPONSE.
+
+4. **Sample rate 不对**: yaml `sample_rate: 22050` **完全不生效**, 因为 `audio.h:24` `AudioStreamInfo` 默认是 `(16, 1, 16000)`, 而 `voice_assistant.cpp` 从来不调 `speaker_->set_audio_stream_info()`. I2S DMA 实际跑 16 kHz mono int16 = 32 KB/s drain. Piper 输出 22050 Hz 直接送过去 → 慢动作播放 + buffer 永远 overflow. **修**: `core2_transport.py._send_audio_chunked_inline` 先用 `scipy.signal.resample` 把 22050→16000, 再发.
+
+5. **Speaker timeout 30s 拖死状态机**: 早期为防 TTS 开头 silent 把 timeout 设 30s. 现在事件流修好后, 这个 timeout 反而让 `RESPONSE_FINISHED` 状态在最后一个 chunk 播完后还要等 30s 才 IDLE → auto-rearm fail (request_start 只在 IDLE 生效). **修**: yaml `speaker.timeout: 30s → 2s`, IDLE 时间从 audio_duration+30s 缩到 audio_duration+2s.
+
+**额外调优**:
+- `speaker.buffer_duration: 500ms → 1500ms` ([core2.yaml:215](../esphome/core2.yaml#L215)): ring_buffer 从 8KB 加到 24KB, 吸收 Piper 句间 ~1s 生成 gap, speaker 不再 mid-response underrun.
+- Send rate 1024B @ 30ms = 34 KB/s ([core2_transport.py:194](../core2_transport.py#L194)): 略超 16 kHz realtime drain (32 KB/s) 让 pre-buffer 保持 healthy 不渐进 underrun.
+- `Core2InputTransport` 注入父 transport 引用, 让 InputTransport 能反向调 `_send_event` 发 STT_VAD_END.
+- `Core2Transport.rearm_listen` 12s 延迟 (audio_duration + 4s buffer 足够典型 5s 回应), 自动 trigger `start_listening` ESPHome service 实现连续对话.
+
+**新增/修改的代码文件**:
+- `esphome/core2.yaml` 触摸 + speaker 配置调优
+- `core2_transport.py` 大改: `UserStoppedSpeakingFrame` 监听, TTS event 顺序, 22050→16000 resample, send rate, rearm_listen
+- `pipeline_pipecat.py` 加 `run_stt` 诊断 log
+- `trigger_listen.py` 新增: 手动 trigger `start_listening` 的独立脚本 (debug 用)
+- `test_speaker_fix.py` 新增: 隔离测试 speaker 协议时序, 不依赖 sherpa/语音
+
+**遗留小问题**:
+- 12s rearm 延迟是估的, 长 LLM 回应 (>10s 音频) 时 Core2 还没 IDLE 会 silently 失败. 真稳的做法是 poll Core2 voice_assistant state — 留 future. 短期解决方案: 用户多等几秒或手动触摸.
+
+---
+
+**Phase 2.4 最终状态 (v1.11, 2026-04-29 23:30) — 已 supersede by v1.13**
+
+> 以下是 v1.11 卡在 speaker silent 时的现状记录，**touch + speaker 已在 v1.13 全部修好**, 保留作历史参考. Demo 和论文都不再走 limitation 路线.
+
+| 链路 | v1.11 状态 |
+|------|------|
+| Pi → Core2 status push (Listening/Thinking/Speaking/Ready + HR/BR) | ✅ |
+| Core2 触摸触发 | ❌ → ✅ v1.13 修好 (interrupt_pin 删除) |
 | Core2 mic 录音 → Pi voice_assistant API 接收 | ✅ |
-| Pi sherpa STT 转 text | ✅ ("HALLO", "WHAT IS THE CAPITAL OF FRANCE" 等被识别) |
-| Radar 注入 LLM system prompt | ✅ ("calm and relaxed" 等状态进 prompt) |
+| Pi sherpa STT 转 text | ✅ |
+| Radar 注入 LLM system prompt | ✅ |
 | LLM 生成 + Piper TTS 出音频 | ✅ |
 | Pi → Core2 TTS audio (chunked 4KB @ 70ms) | ✅ Pi 侧完整发送 + log 验证 |
-| Core2 speaker 播放 | ❌ **silent** — `i2s_audio.speaker: Stopped` 立刻退出, 后续 audio 全 reject |
+| Core2 speaker 播放 | ❌ → ✅ v1.13 修好 (STT_VAD_END + TTS_END(url) + resample) |
 
-**Core2 speaker 阻塞根因**: ESPHome voice_assistant 假设硬件有独立 mic/speaker peripheral, 但 Core2 V1.1 PDM mic + NS4168 speaker 共享 I2S0 (LRCK GPIO0). voice_assistant 状态机不会在 TTS_STREAM_START 时主动 stop mic — mic 仍占 I2S0 → speaker `start_i2s_driver_` 失败 → speaker_task 立刻 delete_task_ 退出 → device 进 IDLE → 后续 chunks 全部 "Cannot receive audio, buffer is full" 丢弃.
+**v1.11 当时假设的 Core2 speaker 阻塞根因 (后来证伪)**: 以为是 Core2 V1.1 PDM mic + NS4168 speaker 共享 I2S0 的硬件冲突. 实际上**软件可以解决** — 只要发 STT_VAD_END 让 voice_assistant.cpp 主动停 mic, mic 就放开 I2S0. v1.13 版本拆出了 5 个独立的软件 root cause (见上).
 
-**Pi 侧已修复的全部点** (commits c8fdfab → ac31bb0):
+**Pi 侧已修复的全部点** (commits c8fdfab → ac31bb0, v1.10 → v1.11):
 1. AXP192 → AXP2101 (Core2 V1.1 PMIC); ESPHome 2025.6 + lboue/esphome-axp2101 + ili9xxx
 2. ALDO3 enable lambda (lboue 默认 disable, NS4168 amp 没电)
 3. `handle_start` return 0 (None 触发 "Server could not be started")
 4. `InputAudioRawFrame` (不是 mixin AudioRawFrame; mic chunks 无法到 STT)
 5. TTS_START 必须带 `text` 字段 (不是 tts_text), 否则 firmware early-return 不启动 speaker
-6. TTS audio chunked 4KB @ 70ms (一次性 122KB 超出 16KB SPEAKER_BUFFER_SIZE)
+6. TTS audio chunked 4KB @ 70ms (一次性 122KB 超出 16KB SPEAKER_BUFFER_SIZE) — v1.13 重新调成 1KB @ 30ms
 7. TTSStoppedFrame 等所有 chunks 发完才发 RUN_END
-8. Speaker timeout 500ms → 30s
-9. Pi-side `start_listening` ESPHome service 替代死掉的触摸 IC
+8. Speaker timeout 500ms → 30s — v1.13 重新调回 2s 解决状态机卡住
+9. Pi-side `start_listening` ESPHome service 替代死掉的触摸 IC — v1.13 后变成 fallback (touch 工作了)
 10. Idle timeout 5min → 30min (调试期不被 cancel)
 
-**Future Work (Phase 2.5 / Day 4+)** 修 Core2 speaker:
-- A. yaml 拆 i2s_audio 成两个 block (i2s_mic, i2s_spk), 让 ESPHome 自动分配 I2S0/I2S1
-- B. 加 mic.stop() before TTS_STREAM_START, mic.start() after RUN_END (改 voice_assistant 状态机或在外层管)
-- C. 改用支持双向独立 audio 的 ESP32-S3 board (Core2 是 ESP32, 只有 2 个 I2S)
-
-### Demo 与论文 fallback
-- Demo 视频用 Core2 mic + Pi 本地输出 (USB DAC/HDMI), Core2 屏幕展示 status + radar 数据
-- 论文里把 Core2 speaker 做完整的 limitation discussion: "Hardware constraint of shared I2S0 on M5Stack Core2 V1.1; future work would deploy on ESP32-S3 with dual I2S, or restructure ESPHome voice_assistant state machine to coordinate exclusive peripheral access."
+### Demo 与论文交付 (v1.13 更新)
+- Demo 视频: 完整端到端 — 用户触摸 Core2 → 说话 → 听 Core2 喇叭回应 → 不触摸继续说. 屏幕同步显示 status + radar HR/BR.
+- 论文 contribution: 多模态 (radar physiological signals → LLM system prompt) 在边缘设备完全跑通, 没有 silent speaker / touch 失败这些 disclaimer 要写进 limitation.
 
 **Phase 2.4 复盘 (2026-04-29 晚, v1.10)**
 
@@ -2517,5 +2559,5 @@ nmap -sn 192.168.1.0/24              # 扫描局域网
 
 ---
 
-**最后更新**: 2026-04-30 (speculative LLM prefill v1 落地, 单元测试 PASS 省 84.5%)
-**版本**: v1.12
+**最后更新**: 2026-05-01 (Phase 2.5: Core2 touch + speaker 全链路打通, 多轮连续对话工作, 不再有论文 limitation)
+**版本**: v1.13

@@ -20,7 +20,7 @@ import psutil
 import sherpa_onnx
 from scipy.io import wavfile
 
-MODEL_DIR = Path(os.path.expanduser("~/Edge-AIGuard/models/streaming-zipformer-en"))
+MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "streaming-zipformer-en"
 ENCODER = MODEL_DIR / "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 DECODER = MODEL_DIR / "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 JOINER = MODEL_DIR / "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"

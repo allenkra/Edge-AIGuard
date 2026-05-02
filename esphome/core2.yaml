@@ -173,10 +173,15 @@ globals:
     restore_value: no
     initial_value: '0.0'
 
-# FT6336 capacitive touch (Core2 screen overlay)
+# FT6336 capacitive touch (Core2 screen overlay).
+# NOTE: NO interrupt_pin. ESP32 GPIO34-39 are input-only with no internal
+# pull-up; FT6336 INT is open-drain → INT line floats → interrupts never
+# fire reliably. With interrupt_pin set, touchscreen base class disables
+# polling (touchscreen.cpp:32 "Touch Polling Stopped"). Removing the line
+# leaves polling active at update_interval (50ms default) which is fast
+# enough for a tap UI.
 touchscreen:
   - platform: ft63x6
-    interrupt_pin: GPIO39
     id: m5_touch
 
 # Phase 2 (incremental rebuild after AXP2101 baseline restored):
@@ -202,12 +207,15 @@ speaker:
     i2s_dout_pin: GPIO2
     sample_rate: 22050
     bits_per_sample: 16bit
-    # Default 500ms is too tight: Pi sends TTS_STREAM_START then audio
-    # in chunks ~70ms apart, but voice_assistant's loop has its own
-    # latency between on_audio and play(), so 500ms idle exit happens
-    # before the first byte reaches the speaker ring buffer. Bump to 30s
-    # so the speaker task waits patiently for chunks during the whole TTS.
-    timeout: 30s
+    # 1500ms ring buffer (default 500ms): absorbs Piper's inter-sentence gaps
+    # — it generates one sentence at a time, so there's a ~500-1000ms pause in
+    # the audio stream between sentences. Without slack, the speaker underruns
+    # mid-response and the listener hears choppy playback.
+    buffer_duration: 1500ms
+    # 2s post-stream timeout: enough for the gap between TTS_STREAM_START and
+    # the first audio chunk (~500ms) without wedging RESPONSE_FINISHED for 28s
+    # after the last chunk plays out. Larger values delay auto-rearm.
+    timeout: 2s
 
 # voice_assistant streams audio in/out via API to Pi-side Core2Transport.
 voice_assistant:

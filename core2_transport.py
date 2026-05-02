@@ -31,6 +31,7 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -40,10 +41,11 @@ VA = VoiceAssistantEventType
 class Core2InputTransport(FrameProcessor):
     """Audio source: pushes AudioRawFrame downstream as Core2 streams mic data."""
 
-    def __init__(self, sample_rate: int = 16000):
+    def __init__(self, sample_rate: int = 16000, transport: "Core2Transport | None" = None):
         super().__init__()
         self._sample_rate = sample_rate
         self._started = False
+        self._transport = transport
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -51,6 +53,16 @@ class Core2InputTransport(FrameProcessor):
             self._started = True
         elif isinstance(frame, EndFrame):
             self._started = False
+        elif isinstance(frame, UserStoppedSpeakingFrame) and self._transport is not None:
+            # Pipecat detected end-of-speech via sherpa STT endpoint. Core2 has no
+            # local VAD so it would otherwise stream mic audio forever, holding
+            # I2S0 and blocking speaker_->start() when TTS_START arrives. Tell
+            # Core2 to stop the mic NOW: STT_VAD_END is the only event that
+            # transitions voice_assistant to STOP_MICROPHONE → mic_source_->stop()
+            # → I2S0 released. Without this, all subsequent TTS audio gets
+            # dropped with "Cannot receive audio, buffer is full" errors.
+            logger.info("[core2.audio.in] UserStoppedSpeakingFrame -> STT_VAD_END")
+            self._transport._send_event(VA.VOICE_ASSISTANT_STT_VAD_END)
         await self.push_frame(frame, direction)
 
     async def push_audio(self, audio_bytes: bytes):
@@ -80,15 +92,22 @@ class Core2OutputTransport(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TTSStartedFrame):
-            logger.info("[core2.audio.out] TTSStartedFrame -> TTS_START + TTS_STREAM_START")
+            logger.info("[core2.audio.out] TTSStartedFrame -> INTENT_END + TTS_START + TTS_END + TTS_STREAM_START")
             # voice_assistant protocol expects INTENT_END before TTS_START so
             # the device's pipeline state machine moves out of "intent" phase.
             self._transport._send_event(VA.VOICE_ASSISTANT_INTENT_END)
-            # ESPHome voice_assistant.cpp checks for arg.name == "text" and
-            # early-returns + skips speaker->start() if it's empty. Field is
-            # literally "text", NOT "tts_text". With empty/missing text the
-            # device never enters playback state — silent speaker.
+            # text="..." required: voice_assistant.cpp:652 early-returns on
+            # empty text so speaker_->start() never runs.
             self._transport._send_event(VA.VOICE_ASSISTANT_TTS_START, {"text": "..."})
+            # CRITICAL: send TTS_END *now*, before any audio chunks. The state
+            # machine only moves to STREAMING_RESPONSE on TTS_END (line 692),
+            # and STREAMING_RESPONSE is the only state that runs write_speaker_
+            # to drain on_audio's 16KB pre-buffer. If TTS_END comes after the
+            # audio (the obvious order), the pre-buffer fills in <1s and every
+            # remaining chunk is dropped with "Cannot receive audio, buffer is
+            # full". url must be non-empty (line 674) — only used by media_player
+            # path which we don't use, so any string works.
+            self._transport._send_event(VA.VOICE_ASSISTANT_TTS_END, {"url": "tts://local"})
             self._transport._send_event(VA.VOICE_ASSISTANT_TTS_STREAM_START)
             self._tts_streaming = True
         elif isinstance(frame, TTSAudioRawFrame):
@@ -96,14 +115,18 @@ class Core2OutputTransport(FrameProcessor):
             # Await the chunked send instead of fire-and-forget so
             # TTSStoppedFrame can't race ahead and emit RUN_END while
             # chunks are still in flight (which makes Core2 drop them).
-            await self._transport._send_audio_chunked_inline(frame.audio)
+            await self._transport._send_audio_chunked_inline(frame.audio, frame.sample_rate)
         elif isinstance(frame, TTSStoppedFrame):
-            logger.info("[core2.audio.out] TTSStoppedFrame -> TTS_STREAM_END + TTS_END + RUN_END")
+            logger.info("[core2.audio.out] TTSStoppedFrame -> TTS_STREAM_END + RUN_END")
             if self._tts_streaming:
+                # TTS_END was already sent at TTSStartedFrame to advance the
+                # state machine early. Just close the stream now.
                 self._transport._send_event(VA.VOICE_ASSISTANT_TTS_STREAM_END)
-                self._transport._send_event(VA.VOICE_ASSISTANT_TTS_END)
                 self._transport._send_event(VA.VOICE_ASSISTANT_RUN_END)
                 self._tts_streaming = False
+                # Auto re-arm Core2 for next turn — continuous conversation
+                # without manual trigger.
+                asyncio.create_task(self._transport.rearm_listen())
 
         await self.push_frame(frame, direction)
 
@@ -126,10 +149,11 @@ class Core2Transport:
         self._sample_rate_out = sample_rate_out
         self._client: Optional[APIClient] = None
         self._reconnect: Optional[ReconnectLogic] = None
-        self._input = Core2InputTransport(sample_rate=sample_rate_in)
+        self._input = Core2InputTransport(sample_rate=sample_rate_in, transport=self)
         self._output = Core2OutputTransport(self)
         self._closed = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._start_listen_svc = None
 
     def input(self) -> Core2InputTransport:
         return self._input
@@ -150,6 +174,15 @@ class Core2Transport:
                 handle_stop=self._on_va_stop,
                 handle_audio=self._on_va_audio,
             )
+            # Cache start_listening service handle so we can re-arm Core2
+            # after each TTS finishes — gives continuous conversation
+            # without depending on the dead touch IC.
+            _, services = await self._client.list_entities_services()
+            self._start_listen_svc = next(
+                (s for s in services if s.name == "start_listening"), None
+            )
+            if not self._start_listen_svc:
+                logger.warning("[core2.audio] start_listening service missing — auto-rearm disabled")
 
         async def on_disconnect(expected: bool):
             level = logger.debug if expected else logger.warning
@@ -172,18 +205,28 @@ class Core2Transport:
         except Exception as e:
             logger.warning(f"[core2.audio] event send failed ({event_type}): {e!r}")
 
-    async def _send_audio_chunked_inline(self, audio_bytes: bytes):
-        # ESPHome voice_assistant.cpp: SPEAKER_BUFFER_SIZE = 16 * 1024 (16KB).
-        # on_audio drops bytes with "Cannot receive audio, buffer is full"
-        # when the chunk can't fit. A whole TTS sentence from Piper
-        # (35KB-150KB) overflows in one go, so we chunk + pace.
-        # 4KB per chunk = ~93ms at 22050Hz int16 mono. Sleep 70ms between
-        # chunks (slightly slower than realtime drain to let speaker keep up
-        # without underflowing — DMA underflow makes the speaker exit too).
+    async def _send_audio_chunked_inline(self, audio_bytes: bytes, src_sample_rate: int = 22050):
+        # ESPHome's voice_assistant + i2s_audio speaker uses the default
+        # AudioStreamInfo (16 kHz mono int16) because voice_assistant.cpp never
+        # calls speaker_->set_audio_stream_info(). The yaml `sample_rate: 22050`
+        # only validates SLAVE-mode I2S and is otherwise ignored — the I2S DMA
+        # is configured at audio_stream_info.get_sample_rate() = 16000.
+        # So we MUST resample Piper's 22050 Hz output to 16 kHz before sending,
+        # or audio plays slow-mo + the 32 KB/s drain rate can't keep up with our
+        # send rate, causing 16KB pre-buffer overflow.
         if self._client is None or self._closed:
             return
-        CHUNK = 4096
-        SLEEP_S = 0.07
+        TARGET_RATE = 16000
+        if src_sample_rate != TARGET_RATE:
+            audio_bytes = self._resample_int16(audio_bytes, src_sample_rate, TARGET_RATE)
+        # 1KB @ 30ms = 34.1 KB/s = 107% of 16-kHz realtime drain (32 KB/s).
+        # Slight overrun keeps Core2's pre-buffer pleasantly full so inter-sentence
+        # gaps from Piper (~1s while it generates the next utterance) don't
+        # underrun the speaker mid-playback. The 16KB pre-buffer + 8KB ring buffer
+        # absorb ~750ms of headroom at this rate; cumulative overrun on a 5s
+        # sentence is ~10KB, well under the 16KB limit.
+        CHUNK = 1024
+        SLEEP_S = 0.030
         try:
             for i in range(0, len(audio_bytes), CHUNK):
                 if self._closed or self._client is None:
@@ -192,6 +235,17 @@ class Core2Transport:
                 await asyncio.sleep(SLEEP_S)
         except Exception as e:
             logger.warning(f"[core2.audio] audio send failed: {e!r}")
+
+    @staticmethod
+    def _resample_int16(audio: bytes, src_rate: int, dst_rate: int) -> bytes:
+        import numpy as np
+        from scipy import signal
+        samples = np.frombuffer(audio, dtype=np.int16)
+        new_n = int(len(samples) * dst_rate / src_rate)
+        resampled = signal.resample(samples.astype(np.float32), new_n)
+        # Clip to int16 range to avoid wrap; resample can overshoot a touch.
+        np.clip(resampled, -32768, 32767, out=resampled)
+        return resampled.astype(np.int16).tobytes()
 
     async def _on_va_start(self, conversation_id: str, flags: int,
                             audio_settings, wake_word_phrase):
@@ -210,8 +264,13 @@ class Core2Transport:
 
     async def _on_va_stop(self, server_side: bool):
         logger.info(f"[core2.audio] VA stop (server_side={server_side})")
-        # User finished speaking. Tell Core2 STT is done; INTENT/TTS events
-        # follow naturally as the pipeline progresses.
+        # STT_VAD_END is the only event that causes voice_assistant.cpp to
+        # transition through STOP_MICROPHONE → call mic_source_->stop() →
+        # release I2S0. Without it, the mic keeps owning I2S0 and the later
+        # speaker_->start() (triggered by TTS_START) fails immediately, so
+        # TTS audio is silently dropped. Send VAD_END FIRST, then STT_END /
+        # INTENT_START which only fire user-visible triggers.
+        self._send_event(VA.VOICE_ASSISTANT_STT_VAD_END)
         self._send_event(VA.VOICE_ASSISTANT_STT_END)
         self._send_event(VA.VOICE_ASSISTANT_INTENT_START)
 
@@ -226,6 +285,27 @@ class Core2Transport:
             with open("/tmp/core2_mic.raw", "ab") as f:
                 f.write(audio_bytes)
         await self._input.push_audio(audio_bytes)
+
+    async def rearm_listen(self, delay_s: float = 12.0):
+        """Trigger Core2 voice_assistant.start so the next user turn captures
+        without waiting for a touch. Voice_assistant.cpp's request_start only
+        works in State::IDLE — anything else is a silent no-op. After RUN_END
+        the device walks RESPONSE_FINISHED → drain speaker_buffer_ → wait for
+        speaker to flush DMA → speaker_->stop() → IDLE. That sequence takes
+        roughly (audio_duration + 5s) — for a typical 6s TTS response, ~11s.
+        Default 12s is a conservative wait; if you really need faster turn,
+        poll Core2's voice_assistant state via the API (TODO).
+        """
+        if self._closed or self._client is None or self._start_listen_svc is None:
+            return
+        try:
+            await asyncio.sleep(delay_s)
+            if self._closed or self._client is None:
+                return
+            await self._client.execute_service(self._start_listen_svc, {})
+            logger.info("[core2.audio] auto-rearm: start_listening sent")
+        except Exception as e:
+            logger.warning(f"[core2.audio] rearm failed: {e!r}")
 
     async def close(self):
         self._closed = True

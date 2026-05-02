@@ -27,9 +27,10 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.frames.frames import EndFrame, TextFrame
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
-TEST_WAV = Path(os.path.expanduser(
-    "~/Edge-AIGuard/models/streaming-zipformer-en/test_0.wav"
-))
+TEST_WAV = (
+    Path(__file__).resolve().parent.parent
+    / "models" / "streaming-zipformer-en" / "test_0.wav"
+)
 
 
 def rss_mb():

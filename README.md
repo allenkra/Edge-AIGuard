@@ -9,7 +9,7 @@ Hardware: **Raspberry Pi 5** (LLM/STT/TTS) + **M5Stack Core2 V1.1**
 (mic + display) + **Seeed MR60BHA2** mmWave radar (HR/BR over WiFi).
 
 For implementation history, design rationale, and decisions, see
-[`Edge-AIGuard-Plan.md`](Edge-AIGuard-Plan.md).
+[`Edge-AIGuard-Plan.md`](docs/Edge-AIGuard-Plan.md).
 
 ---
 
@@ -242,7 +242,7 @@ finals. No LLM, no TTS.
    doesn't stop the mic before starting the speaker, so the speaker
    task fails to claim the I2S peripheral and exits immediately.
    Pi sends TTS audio correctly; Core2 just can't play it. See
-   [`Edge-AIGuard-Plan.md` §"Phase 2.4 最终状态"](Edge-AIGuard-Plan.md)
+   [`Edge-AIGuard-Plan.md` §"Phase 2.4 最终状态"](docs/Edge-AIGuard-Plan.md)
    for repro logs and Future Work options.
 
 2. **Core2 touch IC unresponsive.** FT6336 doesn't appear on the I2C
@@ -282,7 +282,7 @@ Edge-AIGuard-Plan.md   3-day project plan with full implementation log
 ## Project Plan
 
 The full design + day-by-day execution log is in
-[`Edge-AIGuard-Plan.md`](Edge-AIGuard-Plan.md). Read it for:
+[`Edge-AIGuard-Plan.md`](docs/Edge-AIGuard-Plan.md). Read it for:
 
 - why qwen2.5:1.5b not 7B+ (TTFT trade-off)
 - why pipecat over a synchronous loop (Day 1.5 evolution)

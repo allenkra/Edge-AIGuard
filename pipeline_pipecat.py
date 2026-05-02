@@ -156,6 +156,12 @@ class SherpaOnnxSTTService(STTService):
         if self._recognizer is None or self._stream is None:
             return
         samples = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+        # diagnostic: log every 50th call to confirm audio actually reaches sherpa
+        # (we suspected silent failure where chunks streamed but no partials emitted).
+        self._calls = getattr(self, "_calls", 0) + 1
+        if self._calls % 50 == 1:
+            logger.info(f"[stt] run_stt #{self._calls}: {len(samples)} samples, "
+                        f"last_partial={self._last_partial!r}")
         async with self._lock:
             self._stream.accept_waveform(self._sample_rate, samples)
             while self._recognizer.is_ready(self._stream):

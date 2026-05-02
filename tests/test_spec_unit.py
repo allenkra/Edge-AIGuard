@@ -11,9 +11,14 @@ Sequence:
   warm /v1/chat with "what is the capital of France? answer briefly" → measure prefill speedup vs cold
 """
 import asyncio
+import sys
 import time
+from pathlib import Path
 
 import requests
+
+# Tests live in tests/, project modules at repo root — make them importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from speculation import SpeculativePrefillProcessor
 
