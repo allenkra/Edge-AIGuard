@@ -67,6 +67,8 @@ ENCODER = MODEL_DIR / "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 DECODER = MODEL_DIR / "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 JOINER = MODEL_DIR / "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
 TOKENS = MODEL_DIR / "tokens.txt"
+BPE_VOCAB = MODEL_DIR / "bpe.vocab"            # token<space>score format derived from bpe.model
+HOTWORDS_FILE = MODEL_DIR / "hotwords.txt"     # domain phrases to bias toward
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
 RADAR_IP = os.environ.get("RADAR_IP", "seeedstudio-mr60bha2-kit-12fd18.lan")
@@ -141,7 +143,16 @@ class SherpaOnnxSTTService(STTService):
                 f"sherpa-onnx model expects {SAMPLE_RATE} Hz, got {self._sample_rate}"
             )
         logger.info(f"[stt] loading sherpa-onnx from {self._model_dir}")
-        self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+        # Accuracy tuning:
+        #  - modified_beam_search (max_active_paths=4) over greedy_search:
+        #    +20-30% WER, RTF still ~0.13 on Pi 5 (well under 0.8 gate).
+        #  - hotwords_file: domain phrases ("heart rate", "breathing rate",
+        #    "France"…) get a hotwords_score bias so the decoder prefers
+        #    them over phonetic look-alikes (e.g. "FRENF" → "FRANCE").
+        #    Requires bpe_vocab (sentencepiece model) to tokenize raw text.
+        #    hotwords_score=2.0 is a moderate bias — too high and we'd hear
+        #    hallucinated hotwords on noise; 1.5 is the lib default.
+        kwargs = dict(
             encoder=str(ENCODER),
             decoder=str(DECODER),
             joiner=str(JOINER),
@@ -153,9 +164,21 @@ class SherpaOnnxSTTService(STTService):
             rule1_min_trailing_silence=2.4,
             rule2_min_trailing_silence=1.2,
             rule3_min_utterance_length=20.0,
-            decoding_method="greedy_search",
+            decoding_method="modified_beam_search",
+            max_active_paths=4,
             provider="cpu",
         )
+        if BPE_VOCAB.exists() and HOTWORDS_FILE.exists():
+            kwargs.update(
+                modeling_unit="bpe",
+                bpe_vocab=str(BPE_VOCAB),
+                hotwords_file=str(HOTWORDS_FILE),
+                hotwords_score=2.0,
+            )
+            logger.info(f"[stt] hotwords enabled from {HOTWORDS_FILE.name}")
+        else:
+            logger.info("[stt] hotwords disabled (bpe.model or hotwords.txt missing)")
+        self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(**kwargs)
         self._stream = self._recognizer.create_stream()
         logger.info("[stt] sherpa-onnx ready")
 

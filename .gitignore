@@ -11,8 +11,13 @@ plot_*.png
 *.raw
 /tmp_*
 
-# downloaded ONNX / Piper voice models — fetched via setup script
-models/
+# downloaded ONNX / Piper voice models — fetched via setup script.
+# Ignore everything under models/ EXCEPT user-authored hotwords.txt
+# (need to whitelist parent dirs first or git won't descend into them).
+models/*
+!models/streaming-zipformer-en/
+models/streaming-zipformer-en/*
+!models/streaming-zipformer-en/hotwords.txt
 
 # secrets
 secrets.yaml

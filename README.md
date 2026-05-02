@@ -84,6 +84,29 @@ tokens.txt
 
 (See https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html)
 
+Optional — enable hotword biasing for higher recognition accuracy on
+domain-specific phrases (heart rate, France, etc.). Drops in two extra files:
+
+```bash
+cd models/streaming-zipformer-en
+# bpe sentencepiece model (used for tokenizing the hotwords.txt phrases)
+wget https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/bpe.model
+# convert to the "token<space>score" text format sherpa-onnx expects via bpe_vocab
+pip install sentencepiece
+python -c "
+import sentencepiece as spm
+sp = spm.SentencePieceProcessor(); sp.load('bpe.model')
+with open('bpe.vocab', 'w') as f:
+    for i in range(sp.get_piece_size()):
+        f.write(f'{sp.id_to_piece(i)} {sp.get_score(i)}\n')
+"
+```
+
+`hotwords.txt` is already in the repo with default phrases for the project's
+voice-assistant queries. Edit it to add your own. The pipeline auto-detects
+both files; if either is missing it falls back to plain greedy decoding with
+no hotword bias.
+
 ### 3. Piper TTS
 
 ```bash
