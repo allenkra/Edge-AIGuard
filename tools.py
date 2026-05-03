@@ -1,8 +1,4 @@
-"""
-Tool calling 接口 - 为 agentic 能力预留
-注意: tool calling 必须用 /api/chat (非流式), 会牺牲 TTFA
-仅在用户明确触发 agentic 命令时调用, 主对话路径不启用
-"""
+
 import json
 import time
 
