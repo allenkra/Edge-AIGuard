@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# Edge-AIGuard 启动: ollama daemon + warmup + pipeline
+# Edge-AIGuard launcher: ollama daemon + LLM warmup + pipeline.
 #
 # Usage:
-#   export CORE2_NOISE_PSK="..."          # 必需 (--core2*)
-#   scripts/start.sh                      # 默认 --core2 --core2-audio
-#   scripts/start.sh --text --no-audio    # 文本模式
+#   scripts/start.sh                      # default: --core2 --core2-audio
+#   scripts/start.sh --text --no-audio    # text-only mode
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LLM_MODEL="${LLM_MODEL:-qwen2.5:1.5b}"
 
-# ollama daemon (没起就起)
-curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null \
-  || { nohup ollama serve > /tmp/ollama.log 2>&1 & sleep 3; }
+# 1. Start ollama daemon if not running.
+if ! curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null; then
+    echo "[start] launching ollama..."
+    nohup ollama serve > /tmp/ollama.log 2>&1 &
+    sleep 3
+fi
 
-# warmup: 用 prompts.build_system_prompt() 真正吃一遍生产 prompt → cache hot
+# 2. Auto-load CORE2_NOISE_PSK from esphome/secrets.yaml if unset.
+if [[ -z "${CORE2_NOISE_PSK:-}" ]]; then
+    if [[ -f esphome/secrets.yaml ]]; then
+        CORE2_NOISE_PSK=$(grep '^api_password:' esphome/secrets.yaml | cut -d'"' -f2)
+        export CORE2_NOISE_PSK
+        echo "[start] CORE2_NOISE_PSK loaded from esphome/secrets.yaml"
+    else
+        echo "[start] WARNING: CORE2_NOISE_PSK not set and esphome/secrets.yaml not found" >&2
+    fi
+fi
+export CORE2_HOST="${CORE2_HOST:-edge-aiguard-core2.local}"
+
+# 3. Warmup: run the production system prompt once to populate the prompt cache.
 echo "[start] warming $LLM_MODEL with production system prompt..."
 python3 -c "
 import sys, json, urllib.request
@@ -29,6 +43,9 @@ urllib.request.urlopen(urllib.request.Request(
 print(f'  cached {len(sp)} chars')
 "
 
-# 跑 pipeline (CORE2_NOISE_PSK 必须由 caller export)
+# 4. Launch pipeline.
 source ~/ollama/bin/activate
-exec python pipeline_pipecat.py "${@:---core2 --core2-audio}"
+if [ $# -eq 0 ]; then
+    set -- --core2 --core2-audio
+fi
+exec python pipeline_pipecat.py "$@"

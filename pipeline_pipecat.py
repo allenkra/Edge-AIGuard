@@ -277,7 +277,6 @@ class RawWriterProcessor(FrameProcessor):
     """Tail for --no-audio mode. Appends raw 16-bit PCM from TTS to a flat
     .raw file. Play with:
         aplay -r 22050 -f S16_LE -t raw /tmp/edge_aiguard_last.raw
-    Matches existing pipeline.py convention.
     """
 
     def __init__(self, output_path: Path):
@@ -481,7 +480,6 @@ def parse_args():
     return p.parse_args()
 
 
-# TODO(v2): integrate tools.py via OpenAILLMService function-calling
 async def main():
     args = parse_args()
 

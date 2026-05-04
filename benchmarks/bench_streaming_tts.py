@@ -7,7 +7,7 @@ query and system prompt:
   A. Whole-response   stream=False, run piper on full reply
                       (naive sync; everything blocks on full LLM)
   B. Sentence-flush   stream=True, flush on . ! ?
-                      (pipeline.py Day 1 streaming behavior)
+                      (pipecat default aggregator)
   C. Phrase-flush     stream=True, flush on . ! ? OR , : ; (≥6 chars)
                       (pipecat PhraseAwareTextAggregator, our shipped path)
 
@@ -180,11 +180,10 @@ def mode_c_phrase(query: str, system: str) -> tuple[float, str]:
 def piper_first_byte(text: str) -> float:
     """Time from piper subprocess launch to first stdout audio byte (seconds).
 
-    Mirrors pipeline.py's per-flush invocation: fresh subprocess per
-    flush, including model load. This is the conservative figure;
-    pipecat's PiperTTSService keeps a daemon and would amortize the
-    load across a session — that improvement is orthogonal to flush
-    policy and would help all three modes equally."""
+    Conservative per-flush invocation: fresh subprocess per flush, model
+    load included. pipecat's PiperTTSService keeps a daemon and would
+    amortize the load across a session — that improvement is orthogonal
+    to flush policy and would help all three modes equally."""
     t0 = time.perf_counter()
     proc = subprocess.Popen(
         [str(PIPER_BIN), "--model", str(PIPER_MODEL), "--output_raw"],

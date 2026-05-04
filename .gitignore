@@ -27,20 +27,5 @@ secrets.yaml
 .esphome/
 esphome/.esphome/
 
-# course paper drafts (proposal + final report + bibliography) — kept local only
-docs/proposal.tex
-docs/final_report.tex
-docs/references.bib
-docs/*.aux
-docs/*.log
-docs/*.out
-docs/*.bbl
-docs/*.blg
-docs/*.toc
-docs/*.lof
-docs/*.lot
-docs/*.synctex.gz
-docs/*.fdb_latexmk
-docs/*.fls
-docs/_minted-*/
-docs/*.pdf
+# Local-only docs (planning notes, paper drafts, build artifacts)
+docs/

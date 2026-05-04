@@ -1,6 +1,7 @@
-"""
-MR60BHA2 Sensor Kit - 通过 ESPHome native API 读取 HR/BR/presence
-后台线程持续订阅, 主线程通过 get_state() O(1) 取最新窗口均值
+"""MR60BHA2 sensor reader.
+
+Subscribes to HR/BR/presence over ESPHome native API in a background
+thread; main thread reads the rolling-window average via get_state().
 """
 import asyncio
 import threading
